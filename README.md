@@ -41,9 +41,12 @@ default = clean, `--adversarial` = adv variant.
 ```bash
 # Step 1 — build CPGs (Cell 1; trains NOTHING), saves {language}_cpg_bundle.pt
 python main.py --language python
-python main.py --language python --adversarial   # additionally builds adv pool + adv graphs
 python main.py --language java
 python main.py --language cpp --trial-samples 500 --limit 200
+
+# Step 1b — adv pool + adv graphs ONLY (requires the clean bundle first;
+# vocab/stats are reused untouched, clean outputs stay identical)
+python main.py --language python --adversarial
 
 # Step 2 — train exactly ONE model from the bundle (Cell 3 clean / Cell 4 adv)
 python train.py --language python                # Model 1 clean
@@ -78,7 +81,13 @@ python leakage_audit.py --language python
 Bundle files (created by `main.py`, consumed by everything else):
 - `python_cpg_bundle.pt` / `java_cpg_bundle.pt` / `cpp_cpg_bundle.pt`
 - hold vocab + BPE tokenizer + clean-locked normalization + graph lists
-  (adv graphs present only when built with `--adversarial`)
+  (adv graphs present only after `main.py --adversarial`, which requires the
+  clean bundle with matching `--trial-samples`/`--limit` and reuses its
+  vocab/stats untouched)
+
+Determinism: `main.py` and `train.py` both seed all RNGs with 42 first
+(notebook Cell-1 state), so DataLoader shuffling, dropout, and token masking
+follow the notebook trajectory and clean-test accuracy reproduces it.
 
 Checkpoints (notebook-native, no `.npy` graph cache):
 - `model_python_clean_baseline_checkpoint.pth` / `model_python_adv_augmented_checkpoint.pth`

@@ -23,7 +23,7 @@ from language_configs import (
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
 from model import AdvancedASTGraphEncoder, save_checkpoint_for_language
-from pipeline import load_bundle, require_adv_graphs
+from pipeline import load_bundle, require_adv_graphs, seed_everything
 
 
 TRAIN_TITLE = {
@@ -132,7 +132,14 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
 
 
 def train_model(language="python", epochs=45, batch_size=None, adversarial=False, patience=10):
-    """Train one model from the saved bundle. Never builds CPGs."""
+    """Train one model from the saved bundle. Never builds CPGs.
+
+    Seeds first so the DataLoader shuffle / dropout / token-masking trajectory
+    matches the notebook, where Cell 1 seeding carries over into Cells 3/4 in
+    the same process. Without this, the split processes diverge and test
+    accuracy shifts by ~1pt on identical code.
+    """
+    seed_everything()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]

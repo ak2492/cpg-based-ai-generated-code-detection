@@ -28,13 +28,19 @@ from graph_builder import (
 from augment import generate_adversarial_augmentations
 
 
-def _seed_everything():
-    torch.manual_seed(SEED)
+def seed_everything(seed=SEED):
+    """Reproduce notebook Cell-1 RNG state. Call at the start of any process
+    that consumes RNG (training shuffling/dropout/masking, augmentation)."""
+    torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-    np.random.seed(SEED)
-    random.seed(SEED)
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
     torch.backends.cudnn.deterministic = True
+
+
+def _seed_everything():
+    seed_everything()
 
 
 SPLIT_DESC = {
@@ -144,12 +150,14 @@ def bundle_path(language):
     return f"{language}_cpg_bundle.pt"
 
 
-def save_bundle(bundle, path=None):
+def save_bundle(bundle, trial_samples=None, limit=None, path=None):
     ctx = bundle["ctx"]
     language = ctx.language
     path = path or bundle_path(language)
     payload = {
         "language": language,
+        "trial_samples": trial_samples,
+        "limit": limit,
         "type_to_id": ctx.type_to_id,
         "vocab_size": ctx.vocab_size,
         "tokenizer_str": ctx.bpe_tokenizer.to_str(),
@@ -201,6 +209,8 @@ def load_bundle(language, path=None):
     return {
         "ctx": ctx,
         "parser": parser,
+        "trial_samples": payload.get("trial_samples"),
+        "limit": payload.get("limit"),
         "has_adv": payload.get("has_adv", payload.get("train_adv_graphs") is not None),
         "train_clean_graphs": payload["train_clean_graphs"],
         "train_adv_graphs": payload.get("train_adv_graphs"),
@@ -255,3 +265,41 @@ def load_audit_raw_rows(language, trial_samples=None, limit=None):
         "val_eval_data": val_eval_data,
         "test_raw": test_raw,
     }
+
+
+def build_adv_only(language, trial_samples=None, limit=None):
+    """Build ONLY the adversarial pool + adv graphs, reusing a clean bundle.
+
+    Requires `python main.py --language X` (same trial_samples/limit) to have
+    run first: vocab, BPE tokenizer, and clean-locked normalization are reused
+    untouched, so clean outputs stay bit-identical and adv outputs match the
+    full-build path exactly. Only `train_adv_data` is parsed here.
+    """
+    from augment import generate_adversarial_augmentations
+    seed_everything()
+
+    bundle = load_bundle(language)
+    if (bundle.get("trial_samples"), bundle.get("limit")) != (trial_samples, limit):
+        raise ValueError(
+            f"Bundle params mismatch for '{language}': bundle was built with "
+            f"trial_samples={bundle.get('trial_samples')}, limit={bundle.get('limit')} "
+            f"but requested trial_samples={trial_samples}, limit={limit}. "
+            f"Rerun `python main.py --language {language}` with matching params first.")
+    ctx = bundle["ctx"]
+    parser = bundle["parser"]
+
+    train_data, _, _ = load_magecode_splits(language, trial_samples=trial_samples)
+    train_clean_data = balanced_subset(train_data, SEED)
+    if limit is not None:
+        train_clean_data = train_clean_data.select(range(min(limit, len(train_clean_data))))
+
+    train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
+    _, d_adv, _, _ = SPLIT_DESC[language]
+    train_adv_graphs = process_split(train_adv_data, d_adv, ctx)
+    apply_normalization(train_adv_graphs, ctx)
+
+    bundle["train_adv_graphs"] = train_adv_graphs
+    bundle["has_adv"] = True
+    path = save_bundle(bundle, trial_samples=trial_samples, limit=limit)
+    print(f"Adv-only extraction complete: adv={len(train_adv_graphs)} -> {path}")
+    return bundle
