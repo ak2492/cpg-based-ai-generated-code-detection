@@ -117,7 +117,10 @@ def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, va
 
 
 def load_checkpoint(filepath, model, device, optimizer=None):
-    ckpt = torch.load(filepath, map_location=device)
+    try:
+        ckpt = torch.load(filepath, map_location=device, weights_only=False)
+    except TypeError:  # torch < 2.6 without the weights_only kwarg
+        ckpt = torch.load(filepath, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
     if optimizer is not None and 'optimizer_state_dict' in ckpt:
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])

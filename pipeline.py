@@ -1,9 +1,16 @@
 """Shared data pipeline: load -> balance -> augment -> vocab -> graphs -> normalize.
 
 Mirrors Cell 1 of each notebook exactly (prints, descs, test-balancing rule).
-`prepare_graphs()` is used by main.py / train.py / evaluate.py so the
-notebook flow is preserved while exposing a hybrid-folder style CLI.
+`main.py` calls `prepare_graphs()` once and persists the result with
+`save_bundle()`; every downstream script (`train.py`, `evaluate.py`,
+attack/external/audit) loads it with `load_bundle()` so training and
+evaluation never rebuild CPGs. Sequential usage:
+
+  python main.py --language python [--adversarial]
+  python train.py --language python [--adversarial]
+  python evaluate.py --language python [--adversarial]
 """
+import os
 import random
 
 import numpy as np
@@ -23,7 +30,8 @@ from augment import generate_adversarial_augmentations
 
 def _seed_everything():
     torch.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
     np.random.seed(SEED)
     random.seed(SEED)
     torch.backends.cudnn.deterministic = True
@@ -51,8 +59,15 @@ LOADED_MSG = {
 }
 
 
-def prepare_graphs(language="python", trial_samples=None, limit=None):
-    """Full Cell-1 pipeline. `limit` caps balanced splits for quick debugging (None = notebook exact)."""
+def prepare_graphs(language="python", trial_samples=None, limit=None, adversarial=False):
+    """Full Cell-1 pipeline. `limit` caps balanced splits for quick debugging (None = notebook exact).
+
+    The adversarial pool (augmentation + adv graph parsing, ~40% of Cell-1
+    cost) is built ONLY when `adversarial=True`, mirroring
+    `main.py --adversarial`. Without the flag, `train_adv_*` entries are None
+    and only clean/val/test splits are normalized (normalization is always
+    fit on clean, so those outputs are bit-identical either way).
+    """
     _seed_everything()
     print(f"Loading full {language.capitalize()} dataset from Hugging Face..."
           if language != "cpp" else "Loading full C++ dataset from Hugging Face...")
@@ -69,7 +84,10 @@ def prepare_graphs(language="python", trial_samples=None, limit=None):
         train_clean_data = train_clean_data.select(range(min(limit, len(train_clean_data))))
         val_eval_data = val_eval_data.select(range(min(limit, len(val_eval_data))))
 
-    train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
+    if adversarial:
+        train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
+    else:
+        train_adv_data = None
 
     type_to_id, vocab_size, bpe_tokenizer, pad_id, token_to_rank, max_rank = fit_vocab_and_tokenizer(
         train_clean_data, parser, language)
@@ -77,7 +95,10 @@ def prepare_graphs(language="python", trial_samples=None, limit=None):
 
     d_clean, d_adv, d_val, d_test = SPLIT_DESC[language]
     train_clean_graphs = process_split(train_clean_data, d_clean, ctx)
-    train_adv_graphs = process_split(train_adv_data, d_adv, ctx)
+    if adversarial:
+        train_adv_graphs = process_split(train_adv_data, d_adv, ctx)
+    else:
+        train_adv_graphs = None
     val_graphs = process_split(val_eval_data, d_val, ctx)
 
     if language in ("python", "cpp"):
@@ -93,7 +114,8 @@ def prepare_graphs(language="python", trial_samples=None, limit=None):
         test_graphs = process_split(test_balanced_raw, d_test, ctx)
 
     fit_normalization(train_clean_graphs, ctx)
-    for split in (train_clean_graphs, train_adv_graphs, val_graphs, test_graphs):
+    built_splits = [s for s in (train_clean_graphs, train_adv_graphs, val_graphs, test_graphs) if s is not None]
+    for split in built_splits:
         apply_normalization(split, ctx)
 
     print(NORM_MSG[language])
@@ -109,4 +131,127 @@ def prepare_graphs(language="python", trial_samples=None, limit=None):
         "train_adv_graphs": train_adv_graphs,
         "val_graphs": val_graphs,
         "test_graphs": test_graphs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bundle persistence: main.py saves once, every other script loads.
+# Raw HF rows are NOT cached (cheap to reload, no parsing involved);
+# use load_test_raw_rows() / load_audit_raw_rows() for those.
+# ---------------------------------------------------------------------------
+
+def bundle_path(language):
+    return f"{language}_cpg_bundle.pt"
+
+
+def save_bundle(bundle, path=None):
+    ctx = bundle["ctx"]
+    language = ctx.language
+    path = path or bundle_path(language)
+    payload = {
+        "language": language,
+        "type_to_id": ctx.type_to_id,
+        "vocab_size": ctx.vocab_size,
+        "tokenizer_str": ctx.bpe_tokenizer.to_str(),
+        "pad_id": ctx.pad_id,
+        "token_to_rank": ctx.token_to_rank,
+        "max_rank": ctx.max_rank,
+        "means": ctx.means,
+        "stds": ctx.stds,
+        "g_means": ctx.g_means,
+        "g_stds": ctx.g_stds,
+        "has_adv": bundle.get("train_adv_graphs") is not None,
+        "train_clean_graphs": bundle["train_clean_graphs"],
+        "train_adv_graphs": bundle.get("train_adv_graphs"),
+        "val_graphs": bundle["val_graphs"],
+        "test_graphs": bundle["test_graphs"],
+    }
+    torch.save(payload, path)
+    print(f"[+] CPG bundle saved at: {path} (adv graphs: {'yes' if payload['has_adv'] else 'no'})")
+    return path
+
+
+def load_bundle(language, path=None):
+    from tokenizers import Tokenizer
+    path = path or bundle_path(language)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Bundle not found: {path}. Run `python main.py --language {language}` first"
+            " (add --adversarial if you need the adv pool).")
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:  # torch < 2.6 without the weights_only kwarg
+        payload = torch.load(path, map_location="cpu")
+    if payload.get("language", language) != language:
+        raise ValueError(f"Bundle language mismatch: file holds '{payload.get('language')}', requested '{language}'.")
+
+    parser, _ = get_parser(language)
+    ctx = GraphContext(
+        language,
+        parser,
+        payload["type_to_id"],
+        payload["vocab_size"],
+        Tokenizer.from_str(payload["tokenizer_str"]),
+        payload["pad_id"],
+        payload["token_to_rank"],
+        payload["max_rank"],
+    )
+    ctx.means, ctx.stds, ctx.g_means, ctx.g_stds = (
+        payload["means"], payload["stds"], payload["g_means"], payload["g_stds"])
+    return {
+        "ctx": ctx,
+        "parser": parser,
+        "has_adv": payload.get("has_adv", payload.get("train_adv_graphs") is not None),
+        "train_clean_graphs": payload["train_clean_graphs"],
+        "train_adv_graphs": payload.get("train_adv_graphs"),
+        "val_graphs": payload["val_graphs"],
+        "test_graphs": payload["test_graphs"],
+    }
+
+
+def require_adv_graphs(bundle, language):
+    if bundle.get("train_adv_graphs") is None:
+        raise RuntimeError(
+            f"Adv graphs missing for '{language}'. Rerun `python main.py --language {language} --adversarial` first.")
+    return bundle["train_adv_graphs"]
+
+
+def load_test_raw_rows(language):
+    """Reload test raw rows (no graph building) mirroring prepare_graphs test logic."""
+    _, _, test_data = load_magecode_splits(language)
+    if language in ("python", "cpp"):
+        # Balanced Test set extraction to eliminate base-rate skew
+        return balanced_subset(test_data, seed=42)
+    return test_data
+
+
+def load_audit_raw_rows(language, trial_samples=None, limit=None):
+    """Reload raw rows for the leakage audit (no graph building).
+
+    Mirrors the raw-data half of prepare_graphs, including the 20%+20%
+    adversarial augmentation when present in the saved bundle.
+    """
+    from augment import generate_adversarial_augmentations
+    _seed_everything()
+    train_data, val_data, test_data = load_magecode_splits(language, trial_samples=trial_samples)
+    train_clean_data = balanced_subset(train_data, SEED)
+    val_eval_data = balanced_subset(val_data, SEED + 1)
+    if limit is not None:
+        train_clean_data = train_clean_data.select(range(min(limit, len(train_clean_data))))
+        val_eval_data = val_eval_data.select(range(min(limit, len(val_eval_data))))
+    parser, _ = get_parser(language)
+    train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
+    if language in ("python", "cpp"):
+        test_raw = balanced_subset(test_data, seed=42)
+        if limit is not None:
+            test_raw = test_raw.select(range(min(limit, len(test_raw))))
+    else:
+        test_raw = test_data
+        if limit is not None:
+            test_raw = test_raw.select(range(min(limit, len(test_raw))))
+    return {
+        "train_clean_data": train_clean_data,
+        "train_adv_data": train_adv_data,
+        "val_eval_data": val_eval_data,
+        "test_raw": test_raw,
     }

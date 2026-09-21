@@ -1,13 +1,15 @@
 """9-suite robustness benchmark — mirrors Cell 5/6 of each notebook.
 
-Python/C++ use execute_model_eval_with_cost (with latency); Java Cell 5 uses
-execute_model_eval (no cost). This module preserves that per-language
-difference while sharing the 9-suite loop. Single-attack scripts
-(attack_authorship/statistical/semantic/full) reuse `run_single_attack()`.
+Evaluates EXACTLY ONE model per run (hybrid style): default runs all 9
+suites against the clean checkpoint; --adversarial runs them against the
+adv checkpoint. Suite transforms and eval math are notebook-exact; only the
+dual-model comparison wrapper is collapsed to the selected model.
+Graphs come from the {language}_cpg_bundle.pt saved by main.py; raw test
+rows reload cheaply (no graph building here).
 
 Usage:
   python attack_evaluation.py --language python
-  python attack_evaluation.py --language java --limit 200
+  python attack_evaluation.py --language java --adversarial
 """
 import argparse
 import gc
@@ -28,20 +30,18 @@ from attack_utils import (
     set_seed,
 )
 from graph_builder import process_split, apply_normalization
-from pipeline import prepare_graphs
+from pipeline import load_bundle, load_test_raw_rows
 
 
-def _load_both_models(ctx, device, language, adversarial_only=False):
-    def _make():
-        return AdvancedASTGraphEncoder(
-            num_node_types=ctx.vocab_size,
-            bpe_vocab_size=BPE_VOCAB_SIZE,
-            pad_idx=ctx.pad_id,
-        ).to(device)
-    model_clean, model_adv = _make(), _make()
-    load_checkpoint(CLEAN_CHECKPOINT[language], model_clean, device)
-    load_checkpoint(ADV_CHECKPOINT[language], model_adv, device)
-    return model_clean, model_adv
+def _load_model(ctx, device, language, adversarial=False):
+    model = AdvancedASTGraphEncoder(
+        num_node_types=ctx.vocab_size,
+        bpe_vocab_size=BPE_VOCAB_SIZE,
+        pad_idx=ctx.pad_id,
+    ).to(device)
+    ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
+    load_checkpoint(ckpt_file, model, device)
+    return model
 
 
 def _parse_desc(language, suite_name):
@@ -53,20 +53,27 @@ def _parse_desc(language, suite_name):
         return f"Parsing {suite_name}"
 
 
+def _model_tag(language, adversarial):
+    if adversarial:
+        return "Model 2 (Adversarial GNN)"
+    return "Model 1 (Clean Baseline)"
+
+
 def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
-                         trial_samples=None, limit=None, base_seed=42):
+                         base_seed=42, adversarial=False):
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
 
-    bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit)
+    bundle = load_bundle(language)
     ctx = bundle["ctx"]
     test_graphs = bundle["test_graphs"]
-    test_raw = bundle["test_raw"]
+    test_raw = load_test_raw_rows(language)
     parser = bundle["parser"]
 
-    model_clean, model_adv = _load_both_models(ctx, device, language)
+    model = _load_model(ctx, device, language, adversarial=adversarial)
+    tag = _model_tag(language, adversarial)
 
     use_cost = language in ("python", "cpp")
     comparison_records = []
@@ -82,42 +89,28 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
         eval_loader = DataLoader(eval_graphs, batch_size=batch_size, shuffle=False)
 
         if use_cost:
-            res_clean = execute_model_eval_with_cost(model_clean, eval_loader, device, threshold=threshold)
-            res_adv = execute_model_eval_with_cost(model_adv, eval_loader, device, threshold=threshold)
-        else:
-            res_clean = execute_model_eval(model_clean, eval_loader, device, threshold=threshold)
-            res_adv = execute_model_eval(model_adv, eval_loader, device, threshold=threshold)
-
-        if use_cost:
+            res = execute_model_eval_with_cost(model, eval_loader, device, threshold=threshold)
             comparison_records.append({
                 'Scenario': suite_name,
-                'M1_Acc': res_clean['Acc'], 'M1_Prec': res_clean['Prec'], 'M1_Rec': res_clean['Rec'],
-                'M1_F1': res_clean['F1'], 'M1_ROC': res_clean['ROC'], 'M1_FPR': res_clean['FPR'],
-                'M1_Lat': res_clean['Latency_ms'],
-                'M2_Acc': res_adv['Acc'], 'M2_Prec': res_adv['Prec'], 'M2_Rec': res_adv['Rec'],
-                'M2_F1': res_adv['F1'], 'M2_ROC': res_adv['ROC'], 'M2_FPR': res_adv['FPR'],
-                'M2_Lat': res_adv['Latency_ms'],
+                'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
+                'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
+                'Lat': res['Latency_ms'],
             })
         else:
+            res = execute_model_eval(model, eval_loader, device, threshold=threshold)
             comparison_records.append({
                 'Suite': suite_name,
-                'M1_Acc': res_clean['Acc'], 'M1_Prec': res_clean['Prec'], 'M1_Rec': res_clean['Rec'],
-                'M1_F1': res_clean['F1'], 'M1_ROC': res_clean['ROC'], 'M1_FPR': res_clean['FPR'],
-                'M2_Acc': res_adv['Acc'], 'M2_Prec': res_adv['Prec'], 'M2_Rec': res_adv['Rec'],
-                'M2_F1': res_adv['F1'], 'M2_ROC': res_adv['ROC'], 'M2_FPR': res_adv['FPR'],
+                'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
+                'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
             })
 
         print("\n" + "=" * 85)
-        print(f"BENCHMARK: {suite_name.upper()} (N = {res_clean['N']})")
+        print(f"BENCHMARK: {suite_name.upper()} (N = {res['N']}) [{tag}]")
         print("=" * 85)
         if use_cost:
-            print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_clean)
-            print("-" * 85)
-            print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_adv)
+            print_detailed_metrics_with_cost(tag, res)
         else:
-            print_detailed_metrics("Model 1 (Clean Baseline)", res_clean)
-            print("-" * 85)
-            print_detailed_metrics("Model 2 (Adversarial GNN)", res_adv)
+            print_detailed_metrics(tag, res)
 
         if attack_key != "clean":
             del attack_data, eval_graphs
@@ -127,39 +120,35 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
             torch.cuda.empty_cache()
 
     df_comp = pd.DataFrame(comparison_records)
-    title = {"python": "HEAD-TO-HEAD PYTHON COMPARISON SUMMARY",
-             "cpp": "HEAD-TO-HEAD C++ COMPARISON SUMMARY"}.get(language, "HEAD-TO-HEAD SUMMARY MATRIX")
-    print("\n" + "=" * 85 + f"\n{title}\n" + "=" * 85)
+    title = {"python": "PYTHON ROBUSTNESS SUMMARY",
+             "cpp": "C++ ROBUSTNESS SUMMARY"}.get(language, "ROBUSTNESS SUMMARY MATRIX")
+    print("\n" + "=" * 85 + f"\n{title} [{tag}]\n" + "=" * 85)
     print(df_comp.to_string(index=False))
     return df_comp
 
 
 def run_single_attack(language="python", attack_type="auth", mode="enhanced", batch_size=None,
-                      threshold=0.50, trial_samples=None, limit=None, base_seed=42,
+                      threshold=0.50, base_seed=42,
                       target="machine", adversarial=False):
-    """Single-layer CLI used by attack_authorship/statistical/semantic/full.
+    """Single-layer evaluation of exactly one model.
 
     Notebook rule is preserved exactly: basic attacks ALL samples,
     enhanced attacks machine-only. `target` is accepted for hybrid-folder
-    CLI compatibility but does not alter notebook outputs.
+    CLI compatibility but does not alter notebook outputs. Graphs come from
+    the saved bundle; nothing is rebuilt here.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
 
-    bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit)
+    bundle = load_bundle(language)
     ctx = bundle["ctx"]
     test_graphs = bundle["test_graphs"]
-    test_raw = bundle["test_raw"]
+    test_raw = load_test_raw_rows(language)
     parser = bundle["parser"]
 
-    from model import AdvancedASTGraphEncoder, load_checkpoint
-    model = AdvancedASTGraphEncoder(num_node_types=ctx.vocab_size,
-                                    bpe_vocab_size=BPE_VOCAB_SIZE,
-                                    pad_idx=ctx.pad_id).to(device)
-    ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
-    load_checkpoint(ckpt_file, model, device)
+    model = _load_model(ctx, device, language, adversarial=adversarial)
 
     if attack_type == "clean":
         eval_graphs = test_graphs
@@ -170,7 +159,7 @@ def run_single_attack(language="python", attack_type="auth", mode="enhanced", ba
 
     loader = DataLoader(eval_graphs, batch_size=batch_size, shuffle=False)
     res = execute_model_eval_with_cost(model, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost(f"{attack_type}-{mode}", res)
+    print_detailed_metrics_with_cost(f"{attack_type}-{mode} [{_model_tag(language, adversarial)}]", res)
     return res
 
 
@@ -179,12 +168,12 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.50)
-    parser.add_argument("--trial-samples", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--base_seed", type=int, default=42)
+    parser.add_argument("--adversarial", action="store_true",
+                        help="Benchmark the adversarially trained checkpoint instead of clean")
     args = parser.parse_args()
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     run_attack_benchmark(language=args.language, batch_size=args.batch_size,
-                         threshold=args.threshold, trial_samples=args.trial_samples,
-                         limit=args.limit, base_seed=args.base_seed)
+                         threshold=args.threshold, base_seed=args.base_seed,
+                         adversarial=args.adversarial)

@@ -1,14 +1,11 @@
 """Training — mirrors Cell 3 (clean) / Cell 4 (adversarial) of each notebook.
 
-Shared loop with language dispatch for prints/timing/checkpoint names so
-outputs match each notebook exactly:
-  python: BATCH 128, timed, model_python_*_checkpoint.pth
-  cpp:    BATCH 16,  timed, model_cpp_*_checkpoint.pth
-  java:   BATCH 32,  untimed, model_*_checkpoint.pth (no language prefix)
+Trains EXACTLY ONE model per run (hybrid style): default trains Model 1
+clean; --adversarial trains Model 2 adv. Never builds CPGs — graphs always
+come from the {language}_cpg_bundle.pt saved by main.py:
 
-Usage (mirrors hybrid folder):
-  python train.py --language python
-  python train.py --language cpp --adversarial --epochs 45
+  python main.py --language python [--adversarial]
+  python train.py --language python [--adversarial]
 """
 import argparse
 import copy
@@ -22,11 +19,11 @@ from sklearn.metrics import precision_recall_curve, roc_auc_score
 from torch_geometric.loader import DataLoader
 
 from language_configs import (
-    SEED, ACCUMULATION_STEPS, BPE_VOCAB_SIZE,
+    ACCUMULATION_STEPS, BPE_VOCAB_SIZE,
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
 from model import AdvancedASTGraphEncoder, save_checkpoint_for_language
-from pipeline import prepare_graphs
+from pipeline import load_bundle, require_adv_graphs
 
 
 TRAIN_TITLE = {
@@ -134,14 +131,17 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     return model, best_f1, best_roc
 
 
-def train_model(language="python", epochs=45, batch_size=None, adversarial=False,
-                trial_samples=None, limit=None, patience=10):
+def train_model(language="python", epochs=45, batch_size=None, adversarial=False, patience=10):
+    """Train one model from the saved bundle. Never builds CPGs."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
-    bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit)
+    bundle = load_bundle(language)
     ctx = bundle["ctx"]
-    train_graphs = bundle["train_adv_graphs"] if adversarial else bundle["train_clean_graphs"]
+    if adversarial:
+        train_graphs = require_adv_graphs(bundle, language)
+    else:
+        train_graphs = bundle["train_clean_graphs"]
     val_graphs = bundle["val_graphs"]
     return train_single_model(train_graphs, val_graphs, ctx, device, batch_size,
                               epochs=epochs, patience=patience,
@@ -155,13 +155,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true",
                         help="Train the adversarially augmented variant (token masking on)")
-    parser.add_argument("--trial-samples", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--patience", type=int, default=10)
     args = parser.parse_args()
 
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size,
-                adversarial=args.adversarial, trial_samples=args.trial_samples,
-                limit=args.limit, patience=args.patience)
+                adversarial=args.adversarial, patience=args.patience)

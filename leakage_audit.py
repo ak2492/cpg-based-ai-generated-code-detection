@@ -1,7 +1,9 @@
 """SHA256 leakage & contamination audit — exact notebook logic per language.
 
 normalize_*_for_hashing bodies are identical (whitespace strip); per-language
-wrappers are preserved so messages match each notebook verbatim.
+wrappers are preserved so messages match each notebook verbatim. Raw rows
+reload cheaply (no graph building); run after main.py so the same raw pools
+are hashed.
 
 Usage:
   python leakage_audit.py --language python
@@ -11,7 +13,7 @@ import argparse
 import hashlib
 import re
 
-from pipeline import prepare_graphs
+from pipeline import load_audit_raw_rows
 
 
 def _normalize_for_hashing(code_str):
@@ -48,7 +50,7 @@ def run_audit(language="python", trial_samples=None, limit=None):
     print(f"{label} DATA LEAKAGE & CONTAMINATION AUDIT (SHA256)")
     print("=" * 70)
 
-    bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit)
+    bundle = load_audit_raw_rows(language, trial_samples=trial_samples, limit=limit)
     norm_fn = {"python": normalize_python_for_hashing,
                "cpp": normalize_cpp_for_hashing,
                "java": normalize_java_for_hashing}[language]

@@ -1,4 +1,5 @@
 __pycache__/
 *.pth
+*_cpg_bundle.pt
 .ipynb_checkpoints/
 GPTSniffer/

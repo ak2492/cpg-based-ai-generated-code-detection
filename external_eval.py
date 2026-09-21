@@ -1,5 +1,15 @@
 """External OOD evaluations — exact notebook logic per language.
 
+Graphs and vocab come from the {language}_cpg_bundle.pt saved by main.py;
+external datasets are loaded fresh (SemEval/HMCorp/GPTSniffer) exactly as
+notebooks do. Dual-model comparison is preserved here (notebook Cells 7-9
+evaluate both models on every external suite).
+
+Sequential usage:
+  python main.py --language python
+  python train.py --language python && python train.py --language python --adversarial
+  python external_eval.py --language python --suite all
+
 SemEval-2026 Task 13:
   python: filter in ['python','py'], no wrapper, cost eval
   java:   filter == 'java', DummyWrapper class, no-cost eval (Cell 6)
@@ -36,7 +46,7 @@ from attack_utils import (
     set_seed,
 )
 from graph_builder import process_split, apply_normalization
-from pipeline import prepare_graphs
+from pipeline import load_bundle
 
 
 def _load_both(ctx, device, language):
@@ -476,15 +486,13 @@ if __name__ == "__main__":
                         choices=["semeval_A", "semeval_B", "hmcorp", "gptsniffer", "all"])
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.50)
-    parser.add_argument("--trial-samples", type=int, default=None)
-    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--base_seed", type=int, default=42)
     args = parser.parse_args()
 
     set_seed(args.base_seed)
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
-    bundle = prepare_graphs(args.language, trial_samples=args.trial_samples, limit=args.limit)
+    bundle = load_bundle(args.language)
 
     def _run_semeval(subtask, multiclass):
         if args.language == "python":

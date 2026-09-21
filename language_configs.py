@@ -139,7 +139,11 @@ MACRO_NAMES = [
 
 
 def get_parser(language):
-    """Instantiate tree-sitter parser exactly as notebooks do: Language(tsX.language()) + Parser(LANG)."""
+    """Instantiate tree-sitter parser exactly as notebooks do: Language(tsX.language()) + Parser(LANG).
+
+    Falls back to the legacy set_language API on older tree-sitter builds
+    (same fallback as the hybrid folder); the parsed trees are identical.
+    """
     from tree_sitter import Language, Parser
     if language == "python":
         import tree_sitter_python as tsmod
@@ -152,7 +156,12 @@ def get_parser(language):
         lang = Language(tsmod.language())
     else:
         raise ValueError(f"Unsupported language: {language}")
-    return Parser(lang), lang
+    try:
+        return Parser(lang), lang
+    except TypeError:
+        p = Parser()
+        p.set_language(lang)
+        return p, lang
 
 
 def get_reserved(language):

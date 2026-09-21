@@ -33,41 +33,52 @@ pip install torch-scatter -f https://data.pyg.org/whl/torch-2.10.0+cu128.html
 python -c "import torch; pt=torch.__version__.split('+')[0]; cu=f\"cu{torch.version.cuda.replace('.', '')}\" if torch.version.cuda else 'cpu'; print(f'pip install torch-scatter -f https://data.pyg.org/whl/torch-{pt}+{cu}.html')"
 ```
 
-## Usage (same style as hybrid folder)
+## Usage — sequential co-dependent pipeline (same style as hybrid folder)
+
+Each step consumes the previous step's artifact. One model per run:
+default = clean, `--adversarial` = adv variant.
 
 ```bash
-# Full end-to-end per language (data -> graphs -> clean + adv training)
+# Step 1 — build CPGs (Cell 1; trains NOTHING), saves {language}_cpg_bundle.pt
 python main.py --language python
+python main.py --language python --adversarial   # additionally builds adv pool + adv graphs
 python main.py --language java
-python main.py --language cpp
+python main.py --language cpp --trial-samples 500 --limit 200
 
-# Single-model training (mirrors train.py in hybrid folder)
-python train.py --language python
-python train.py --language cpp --adversarial
-python train.py --language java --epochs 45 --batch_size 32
+# Step 2 — train exactly ONE model from the bundle (Cell 3 clean / Cell 4 adv)
+python train.py --language python                # Model 1 clean
+python train.py --language python --adversarial  # Model 2 adv (needs adv bundle)
+python train.py --language cpp --adversarial --epochs 45
+python train.py --language java --batch_size 32
 
-# Clean test evaluation (mirrors evaluate.py in hybrid folder)
+# Step 3 — test exactly ONE model (clean default, adv with flag)
 python evaluate.py --language python
 python evaluate.py --language cpp --adversarial
 
-# 9-suite robustness benchmark (clean + auth/stat/sem/full x basic/enhanced)
+# 9-suite robustness benchmark, one model per run
 python attack_evaluation.py --language python
-python attack_evaluation.py --language java --limit 200
+python attack_evaluation.py --language java --adversarial
 
-# Single-layer attacks
+# Single-layer attacks, one model per run
 python attack_authorship.py --language python --mode basic
 python attack_statistical.py --language cpp --mode enhanced
 python attack_semantic.py --language java --mode enhanced
 python attack_full.py --language java --mode basic --target all
+python attack_full.py --language python --mode enhanced --adversarial
 
-# External OOD (SemEval-2026 A/B, HMCorp, GPTSniffer-java-only)
+# External OOD (SemEval-2026 A/B, HMCorp, GPTSniffer-java-only; dual-model, as in notebooks)
 python external_eval.py --language python --suite all
 python external_eval.py --language cpp --suite semeval_A
 python external_eval.py --language java --suite gptsniffer
 
-# Leakage audit (SHA256, <0.5% PASS)
+# Leakage audit (SHA256, <0.5% PASS; raw rows only, no graphs)
 python leakage_audit.py --language python
 ```
+
+Bundle files (created by `main.py`, consumed by everything else):
+- `python_cpg_bundle.pt` / `java_cpg_bundle.pt` / `cpp_cpg_bundle.pt`
+- hold vocab + BPE tokenizer + clean-locked normalization + graph lists
+  (adv graphs present only when built with `--adversarial`)
 
 Checkpoints (notebook-native, no `.npy` graph cache):
 - `model_python_clean_baseline_checkpoint.pth` / `model_python_adv_augmented_checkpoint.pth`
