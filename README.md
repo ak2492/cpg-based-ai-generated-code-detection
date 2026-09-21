@@ -15,11 +15,22 @@ virtual node, def-use, CFG, call, arg-param) encoded by a 4-layer gated RGCN
 
 ## Installation
 
+Step 1 — everything except `torch-scatter` (fast, no compilation):
+
 ```bash
 pip install -r requirements.txt
-# torch-scatter wheel matching your torch/CUDA (same as notebook Cell 0):
-#   pt_version=$(python -c "import torch; print(torch.__version__.split('+')[0])")
-#   pip install torch-scatter -f https://data.pyg.org/whl/torch-${pt_version}+cu121.html
+```
+
+Step 2 — `torch-scatter` from the PyG wheel index, exactly like notebook
+Cell 0 (required by `RGCNConv` in `model.py`; do NOT `pip install torch-scatter`
+bare — PyPI only has an sdist and Kaggle hangs building it):
+
+```bash
+# Fixed env from the Kaggle log (torch 2.10.0+cu128):
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.10.0+cu128.html
+
+# Or dynamic (same logic as notebook Cell 0, works across torch/CUDA):
+python -c "import torch; pt=torch.__version__.split('+')[0]; cu=f\"cu{torch.version.cuda.replace('.', '')}\" if torch.version.cuda else 'cpu'; print(f'pip install torch-scatter -f https://data.pyg.org/whl/torch-{pt}+{cu}.html')"
 ```
 
 ## Usage (same style as hybrid folder)

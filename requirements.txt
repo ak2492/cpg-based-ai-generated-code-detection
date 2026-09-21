@@ -1,6 +1,9 @@
+# NOTE: torch-scatter is intentionally NOT listed here.
+# PyPI only hosts an sdist for torch-scatter (forces a 5+ min from-source
+# build on Kaggle). Install it from the PyG wheel index instead, exactly
+# like notebook Cell 0 (see README Installation step 2).
 torch
 torch-geometric
-torch-scatter
 tree-sitter
 tree-sitter-python
 tree-sitter-java
