@@ -1,0 +1,15 @@
+torch
+torch-geometric
+torch-scatter
+tree-sitter
+tree-sitter-python
+tree-sitter-java
+tree-sitter-cpp
+datasets
+scikit-learn
+tqdm
+tokenizers
+pandas
+numpy
+huggingface_hub
+scipy
