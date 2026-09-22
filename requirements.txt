@@ -16,3 +16,4 @@ pandas
 numpy
 huggingface_hub
 scipy
+psutil

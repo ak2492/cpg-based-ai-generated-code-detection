@@ -15,8 +15,8 @@ import gc
 import torch
 from torch_geometric.loader import DataLoader
 
-from language_configs import BPE_VOCAB_SIZE, DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import AdvancedASTGraphEncoder, load_checkpoint
+from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
+from model import build_encoder_from_checkpoint
 from attack_utils import execute_model_eval_with_cost, print_detailed_metrics_with_cost
 from pipeline import load_bundle
 
@@ -31,13 +31,8 @@ def evaluate_model(language="python", batch_size=None, adversarial=False, thresh
     ctx = bundle["ctx"]
     test_graphs = bundle["test_graphs"]
 
-    model = AdvancedASTGraphEncoder(
-        num_node_types=ctx.vocab_size,
-        bpe_vocab_size=BPE_VOCAB_SIZE,
-        pad_idx=ctx.pad_id,
-    ).to(device)
     ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
-    load_checkpoint(ckpt_file, model, device)
+    model, _ = build_encoder_from_checkpoint(ctx, ckpt_file, device)
     model.eval()
 
     loader = DataLoader(test_graphs, batch_size=batch_size, shuffle=False)

@@ -36,12 +36,10 @@ import subprocess
 import torch
 from torch_geometric.loader import DataLoader
 
-from language_configs import SEED, BPE_VOCAB_SIZE, DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import AdvancedASTGraphEncoder, load_checkpoint
+from language_configs import SEED, DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
+from model import build_encoder_from_checkpoint
 from attack_utils import (
-    execute_model_eval,
     execute_model_eval_with_cost,
-    print_detailed_metrics,
     print_detailed_metrics_with_cost,
     set_seed,
 )
@@ -50,13 +48,8 @@ from pipeline import load_bundle
 
 
 def _load_both(ctx, device, language):
-    def _make():
-        return AdvancedASTGraphEncoder(num_node_types=ctx.vocab_size,
-                                       bpe_vocab_size=BPE_VOCAB_SIZE,
-                                       pad_idx=ctx.pad_id).to(device)
-    m_clean, m_adv = _make(), _make()
-    load_checkpoint(CLEAN_CHECKPOINT[language], m_clean, device)
-    load_checkpoint(ADV_CHECKPOINT[language], m_adv, device)
+    m_clean, _ = build_encoder_from_checkpoint(ctx, CLEAN_CHECKPOINT[language], device)
+    m_adv, _ = build_encoder_from_checkpoint(ctx, ADV_CHECKPOINT[language], device)
     return m_clean, m_adv
 
 
@@ -174,15 +167,15 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
 
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
-    res_m1 = execute_model_eval(model_clean, loader, device, threshold=threshold)
-    res_m2 = execute_model_eval(model_adv, loader, device, threshold=threshold)
+    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
 
     print("\n" + "-" * 85)
     print(f"SEMEVAL SUBTASK {subtask_name} RESULTS")
     print("-" * 85)
-    print_detailed_metrics("Model 1 (Clean Baseline)", res_m1)
+    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
     print("-" * 85)
-    print_detailed_metrics("Model 2 (Adversarial GNN)", res_m2)
+    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced, semeval_graphs, loader
     gc.collect()

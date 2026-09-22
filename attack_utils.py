@@ -20,6 +20,20 @@ from sklearn.metrics import (
 
 from language_configs import get_parser, get_reserved
 
+try:
+    import psutil as _psutil
+    _psutil_proc = _psutil.Process()
+except ImportError:  # pragma: no cover - Kaggle always has psutil
+    _psutil = None
+    _psutil_proc = None
+
+
+def current_rss_mb():
+    """Current process RSS in MB (0.0 if psutil unavailable)."""
+    if _psutil_proc is None:
+        return 0.0
+    return _psutil_proc.memory_info().rss / (1024 * 1024)
+
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -485,6 +499,7 @@ def execute_model_eval(eval_model, loader, device, threshold=0.50):
 def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
     eval_model.eval()
     probs, labels = [], []
+    rss_before = current_rss_mb()
     t_start = time.perf_counter()
     with torch.no_grad():
         for batch in loader:
@@ -493,6 +508,7 @@ def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
             labels.extend(batch.y.cpu().numpy().flatten())
 
     inf_duration = time.perf_counter() - t_start
+    peak_ram_mb = max(rss_before, current_rss_mb())
     probs, labels = np.array(probs), np.array(labels)
     if len(labels) == 0:
         return None
@@ -511,7 +527,8 @@ def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
         'ROC': roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else 0.0,
         'FPR': fp / max(1, fp + tn),
         'TN': tn, 'FP': fp, 'FN': fn, 'TP': tp, 'N': len(labels),
-        'Latency_ms': latency_ms, 'Throughput': throughput
+        'Latency_ms': latency_ms, 'Throughput': throughput,
+        'PeakRAM_MB': peak_ram_mb,
     }
 
 
@@ -525,7 +542,7 @@ def print_detailed_metrics_with_cost(model_name, res):
     print(f"{model_name}:")
     print(f"  Metrics -> Acc: {res['Acc']:.4f} | Prec: {res['Prec']:.4f} | Rec: {res['Rec']:.4f} | F1: {res['F1']:.4f} | ROC: {res['ROC']:.4f} | FPR: {res['FPR']:.4f}")
     print(f"  ConfMat -> TN: {res['TN']:<5} FP: {res['FP']:<5} FN: {res['FN']:<5} TP: {res['TP']:<5}")
-    print(f"  Cost    -> Latency: {res['Latency_ms']:.2f} ms/graph | Throughput: {res['Throughput']:.2f} graphs/sec")
+    print(f"  Cost    -> Latency: {res['Latency_ms']:.2f} ms/graph | Throughput: {res['Throughput']:.2f} graphs/sec | PeakRAM: {res.get('PeakRAM_MB', 0.0):.2f} MB")
 
 
 def evaluate_distribution_shift(train_graphs, ood_graphs, feature_names=None):

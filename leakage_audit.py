@@ -57,7 +57,7 @@ def run_audit(language="python", trial_samples=None, limit=None):
     clean_tag = {"python": "Python Clean Train", "cpp": "C++ Clean Train", "java": "Java Clean Train"}[language]
     adv_tag = {"python": "Python Augmented Train", "cpp": "C++ Augmented Train", "java": "Java Augmented Train"}[language]
     val_tag = {"python": "Python Validation", "cpp": "C++ Validation", "java": "Java Validation"}[language]
-    test_tag = {"python": "Python Balanced Test", "cpp": "C++ Balanced Test", "java": "Java Test"}[language]
+    test_tag = {"python": "Python Full Test", "cpp": "C++ Balanced Test", "java": "Java Full Test"}[language]
 
     train_clean_hashes = compute_split_hashes(clean_tag, bundle["train_clean_data"], norm_fn)
     train_adv_hashes = compute_split_hashes(adv_tag, bundle["train_adv_data"], norm_fn)

@@ -54,6 +54,10 @@ python train.py --language python --adversarial  # Model 2 adv (needs adv bundle
 python train.py --language cpp --adversarial --epochs 45
 python train.py --language java --batch_size 32
 
+# Grid search: every output-affecting hyperparameter is a flag (defaults = notebook values)
+python train.py --language java --hidden_dim 128 --num_layers 2 --lr 1e-4 --epochs 60
+python train.py --language python --dropout_gnn 0.2 --mask_rate 0.2 --patience 15
+
 # Step 3 — test exactly ONE model (clean default, adv with flag)
 python evaluate.py --language python
 python evaluate.py --language cpp --adversarial
@@ -84,6 +88,26 @@ Bundle files (created by `main.py`, consumed by everything else):
   (adv graphs present only after `main.py --adversarial`, which requires the
   clean bundle with matching `--trial-samples`/`--limit` and reuses its
   vocab/stats untouched)
+
+Test sets: python/java evaluate on the FULL test set, C++ on the balanced
+test set (rebuilt bundles required after this change; train/val pools and
+checkpoints are unaffected).
+
+Hyperparameter flags (`train.py`; omit any flag for the notebook default):
+- Model: `--type_dim` 64, `--subword_dim` 128, `--hidden_dim` 256,
+  `--global_dim` 16, `--num_layers` 4, `--dropout_gnn` 0.15,
+  `--pool_hidden` 128, `--film_hidden` 128, `--cls_hidden1` 256,
+  `--cls_hidden2` 64, `--dropout_cls1` 0.3, `--dropout_cls2` 0.2,
+  `--mask_rate` 0.15
+- Training: `--lr` 5e-4, `--weight_decay` 1e-3, `--epochs` 45,
+  `--patience` 10, `--accum_steps` 2, `--tmax` 45, `--eta_min` 1e-6,
+  `--smooth_pos` 0.975, `--smooth_neg` 0.025, `--grad_clip` 1.0,
+  `--threshold` 0.50, `--batch_size` per-language default
+- Locked (no flag; changing them breaks graph/checkpoint compat):
+  `struct_dim=34`, `num_relations=16`, conv kernel 3, BPE/subword sizes,
+  `MAX_NODES`/`MAX_DEPTH`, augmentation rates, attack magnitudes
+- Checkpoints store their `hyperparams`; eval/attack/external rebuild the
+  model from them (old checkpoints fall back to notebook defaults)
 
 Determinism: `main.py` and `train.py` both seed all RNGs with 42 first
 (notebook Cell-1 state), so DataLoader shuffling, dropout, and token masking

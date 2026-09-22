@@ -2,8 +2,8 @@
 
 Evaluates EXACTLY ONE model per run (hybrid style): default runs all 9
 suites against the clean checkpoint; --adversarial runs them against the
-adv checkpoint. Suite transforms and eval math are notebook-exact; only the
-dual-model comparison wrapper is collapsed to the selected model.
+adv checkpoint. Suite transforms and eval math are notebook-exact; all three
+languages report cost metrics (latency/throughput/peak RAM).
 Graphs come from the {language}_cpg_bundle.pt saved by main.py; raw test
 rows reload cheaply (no graph building here).
 
@@ -18,14 +18,12 @@ import pandas as pd
 import torch
 from torch_geometric.loader import DataLoader
 
-from language_configs import BPE_VOCAB_SIZE, DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import AdvancedASTGraphEncoder, load_checkpoint
+from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
+from model import build_encoder_from_checkpoint
 from attack_utils import (
     ATTACK_SUITES,
     generate_attack_samples,
-    execute_model_eval,
     execute_model_eval_with_cost,
-    print_detailed_metrics,
     print_detailed_metrics_with_cost,
     set_seed,
 )
@@ -34,13 +32,8 @@ from pipeline import load_bundle, load_test_raw_rows
 
 
 def _load_model(ctx, device, language, adversarial=False):
-    model = AdvancedASTGraphEncoder(
-        num_node_types=ctx.vocab_size,
-        bpe_vocab_size=BPE_VOCAB_SIZE,
-        pad_idx=ctx.pad_id,
-    ).to(device)
     ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
-    load_checkpoint(ckpt_file, model, device)
+    model, _ = build_encoder_from_checkpoint(ctx, ckpt_file, device)
     return model
 
 
@@ -75,7 +68,6 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
     model = _load_model(ctx, device, language, adversarial=adversarial)
     tag = _model_tag(language, adversarial)
 
-    use_cost = language in ("python", "cpp")
     comparison_records = []
 
     for suite_name, attack_key, mode in ATTACK_SUITES:
@@ -88,29 +80,18 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
 
         eval_loader = DataLoader(eval_graphs, batch_size=batch_size, shuffle=False)
 
-        if use_cost:
-            res = execute_model_eval_with_cost(model, eval_loader, device, threshold=threshold)
-            comparison_records.append({
-                'Scenario': suite_name,
-                'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
-                'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
-                'Lat': res['Latency_ms'],
-            })
-        else:
-            res = execute_model_eval(model, eval_loader, device, threshold=threshold)
-            comparison_records.append({
-                'Suite': suite_name,
-                'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
-                'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
-            })
+        res = execute_model_eval_with_cost(model, eval_loader, device, threshold=threshold)
+        comparison_records.append({
+            'Scenario': suite_name,
+            'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
+            'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
+            'Lat': res['Latency_ms'], 'RAM': res['PeakRAM_MB'],
+        })
 
         print("\n" + "=" * 85)
         print(f"BENCHMARK: {suite_name.upper()} (N = {res['N']}) [{tag}]")
         print("=" * 85)
-        if use_cost:
-            print_detailed_metrics_with_cost(tag, res)
-        else:
-            print_detailed_metrics(tag, res)
+        print_detailed_metrics_with_cost(tag, res)
 
         if attack_key != "clean":
             del attack_data, eval_graphs
@@ -121,7 +102,8 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
 
     df_comp = pd.DataFrame(comparison_records)
     title = {"python": "PYTHON ROBUSTNESS SUMMARY",
-             "cpp": "C++ ROBUSTNESS SUMMARY"}.get(language, "ROBUSTNESS SUMMARY MATRIX")
+             "cpp": "C++ ROBUSTNESS SUMMARY",
+             "java": "JAVA ROBUSTNESS SUMMARY"}.get(language, "ROBUSTNESS SUMMARY MATRIX")
     print("\n" + "=" * 85 + f"\n{title} [{tag}]\n" + "=" * 85)
     print(df_comp.to_string(index=False))
     return df_comp

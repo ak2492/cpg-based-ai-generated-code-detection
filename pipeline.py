@@ -45,11 +45,11 @@ def _seed_everything():
 
 SPLIT_DESC = {
     "python": ("Parsing Clean Baseline Python Graphs", "Parsing Augmented Python Train Graphs",
-               "Parsing Validation Python Graphs", "Parsing Rebalanced Python Test Graphs"),
+               "Parsing Validation Python Graphs", "Parsing Full Python Test Graphs"),
     "cpp": ("Parsing Clean Baseline C++ Graphs", "Parsing Augmented C++ Train Graphs",
             "Parsing Validation C++ Graphs", "Parsing Rebalanced C++ Test Graphs"),
     "java": ("Parsing Clean Baseline Train Graphs", "Parsing Augmented Train Graphs",
-             "Parsing Validation Graphs", "Parsing Clean Test Graphs"),
+             "Parsing Validation Graphs", "Parsing Full Java Test Graphs"),
 }
 
 NORM_MSG = {
@@ -107,13 +107,14 @@ def prepare_graphs(language="python", trial_samples=None, limit=None, adversaria
         train_adv_graphs = None
     val_graphs = process_split(val_eval_data, d_val, ctx)
 
-    if language in ("python", "cpp"):
-        # Balanced Test set extraction to eliminate base-rate skew
+    if language == "cpp":
+        # Balanced Test set extraction to eliminate base-rate skew (C++ only)
         test_balanced_raw = balanced_subset(test_data, seed=42)
         if limit is not None:
             test_balanced_raw = test_balanced_raw.select(range(min(limit, len(test_balanced_raw))))
         test_graphs = process_split(test_balanced_raw, d_test, ctx)
     else:
+        # Full test set, no balancing (python/java)
         test_balanced_raw = test_data
         if limit is not None:
             test_balanced_raw = test_balanced_raw.select(range(min(limit, len(test_balanced_raw))))
@@ -227,9 +228,9 @@ def require_adv_graphs(bundle, language):
 
 
 def load_test_raw_rows(language):
-    """Reload test raw rows (no graph building) mirroring prepare_graphs test logic."""
+    """Reload test raw rows (no graph building): full set except C++ balanced."""
     _, _, test_data = load_magecode_splits(language)
-    if language in ("python", "cpp"):
+    if language == "cpp":
         # Balanced Test set extraction to eliminate base-rate skew
         return balanced_subset(test_data, seed=42)
     return test_data
@@ -251,7 +252,7 @@ def load_audit_raw_rows(language, trial_samples=None, limit=None):
         val_eval_data = val_eval_data.select(range(min(limit, len(val_eval_data))))
     parser, _ = get_parser(language)
     train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
-    if language in ("python", "cpp"):
+    if language == "cpp":
         test_raw = balanced_subset(test_data, seed=42)
         if limit is not None:
             test_raw = test_raw.select(range(min(limit, len(test_raw))))
