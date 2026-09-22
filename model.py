@@ -29,9 +29,10 @@ class GatedGNNLayer(nn.Module):
 
 # Notebook-exact grid-searchable defaults. The constructor literals below mirror
 # these values; keep both in sync. struct_dim (34-d features) and
-# num_relations (16 edge types) stay locked — changing them breaks graph compat.
+# num_relations (16 edge types), and global_dim (16-d macro stats) stay locked —
+# they are dictated by the graph data, and any other value fails forward.
 HPARAM_DEFAULTS = {
-    'type_dim': 64, 'subword_dim': 128, 'hidden_dim': 256, 'global_dim': 16,
+    'type_dim': 64, 'subword_dim': 128, 'hidden_dim': 256,
     'num_layers': 4, 'dropout_gnn': 0.15,
     'pool_hidden': 128, 'film_hidden': 128,
     'cls_hidden1': 256, 'cls_hidden2': 64,
@@ -169,7 +170,7 @@ def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None):
         bpe_vocab_size=bpe_vocab_size or BPE_VOCAB_SIZE,
         pad_idx=ctx.pad_id,
         type_dim=hp['type_dim'], subword_dim=hp['subword_dim'],
-        hidden_dim=hp['hidden_dim'], global_dim=hp['global_dim'],
+        hidden_dim=hp['hidden_dim'], global_dim=16,
         num_layers=hp['num_layers'], dropout_gnn=hp['dropout_gnn'],
         pool_hidden=hp['pool_hidden'], film_hidden=hp['film_hidden'],
         cls_hidden1=hp['cls_hidden1'], cls_hidden2=hp['cls_hidden2'],

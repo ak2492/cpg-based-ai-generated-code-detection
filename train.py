@@ -45,7 +45,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                        grad_clip=1.0, threshold=0.50,
-                       type_dim=64, subword_dim=128, hidden_dim=256, global_dim=16,
+                       type_dim=64, subword_dim=128, hidden_dim=256,
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
                        dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15):
@@ -54,7 +54,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         bpe_vocab_size=BPE_VOCAB_SIZE,
         pad_idx=ctx.pad_id,
         type_dim=type_dim, subword_dim=subword_dim, hidden_dim=hidden_dim,
-        global_dim=global_dim, num_layers=num_layers, dropout_gnn=dropout_gnn,
+        num_layers=num_layers, dropout_gnn=dropout_gnn,
         pool_hidden=pool_hidden, film_hidden=film_hidden,
         cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
         dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
@@ -62,7 +62,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     ).to(device)
     hyperparams = {
         'type_dim': type_dim, 'subword_dim': subword_dim, 'hidden_dim': hidden_dim,
-        'global_dim': global_dim, 'num_layers': num_layers, 'dropout_gnn': dropout_gnn,
+        'num_layers': num_layers, 'dropout_gnn': dropout_gnn,
         'pool_hidden': pool_hidden, 'film_hidden': film_hidden,
         'cls_hidden1': cls_hidden1, 'cls_hidden2': cls_hidden2,
         'dropout_cls1': dropout_cls1, 'dropout_cls2': dropout_cls2,
@@ -160,7 +160,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                 lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
-                type_dim=64, subword_dim=128, hidden_dim=256, global_dim=16,
+                type_dim=64, subword_dim=128, hidden_dim=256,
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
                 dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15):
@@ -189,7 +189,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                               accum_steps=accum_steps, smooth_pos=smooth_pos, smooth_neg=smooth_neg,
                               grad_clip=grad_clip, threshold=threshold,
                               type_dim=type_dim, subword_dim=subword_dim, hidden_dim=hidden_dim,
-                              global_dim=global_dim, num_layers=num_layers, dropout_gnn=dropout_gnn,
+                              num_layers=num_layers, dropout_gnn=dropout_gnn,
                               pool_hidden=pool_hidden, film_hidden=film_hidden,
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
@@ -209,7 +209,6 @@ def _add_hyper_args(parser):
     parser.add_argument("--type_dim", type=int, default=64)
     parser.add_argument("--subword_dim", type=int, default=128)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--global_dim", type=int, default=16)
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--dropout_gnn", type=float, default=0.15)
     parser.add_argument("--pool_hidden", type=int, default=128)
@@ -241,7 +240,7 @@ if __name__ == "__main__":
                 accum_steps=args.accum_steps, smooth_pos=args.smooth_pos, smooth_neg=args.smooth_neg,
                 grad_clip=args.grad_clip, threshold=args.threshold,
                 type_dim=args.type_dim, subword_dim=args.subword_dim, hidden_dim=args.hidden_dim,
-                global_dim=args.global_dim, num_layers=args.num_layers, dropout_gnn=args.dropout_gnn,
+                num_layers=args.num_layers, dropout_gnn=args.dropout_gnn,
                 pool_hidden=args.pool_hidden, film_hidden=args.film_hidden,
                 cls_hidden1=args.cls_hidden1, cls_hidden2=args.cls_hidden2,
                 dropout_cls1=args.dropout_cls1, dropout_cls2=args.dropout_cls2,

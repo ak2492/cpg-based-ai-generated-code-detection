@@ -82,7 +82,6 @@ def build_space(trial, language, preset):
     # -- full preset: everything else output-affecting --
     kw["type_dim"] = trial.suggest_categorical("type_dim", [32, 64, 96])
     kw["subword_dim"] = trial.suggest_categorical("subword_dim", [64, 128, 192])
-    kw["global_dim"] = trial.suggest_categorical("global_dim", [8, 16, 32])
     kw["pool_hidden"] = trial.suggest_categorical("pool_hidden", [64, 128, 256])
     kw["film_hidden"] = trial.suggest_categorical("film_hidden", [64, 128, 256])
     kw["cls_hidden1"] = trial.suggest_categorical("cls_hidden1", [128, 256, 512])
@@ -108,7 +107,7 @@ def space_snapshot(language, preset):
     if preset == "full":
         snap.update({
             "type_dim": [32, 64, 96], "subword_dim": [64, 128, 192],
-            "global_dim": [8, 16, 32], "pool_hidden": [64, 128, 256],
+            "pool_hidden": [64, 128, 256],
             "film_hidden": [64, 128, 256], "cls_hidden1": [128, 256, 512],
             "cls_hidden2": [32, 64, 128], "dropout_cls1": "[0.1, 0.5]",
             "dropout_cls2": "[0.0, 0.4]", "patience": [5, 10, 15],
@@ -271,8 +270,11 @@ def main():
         sampler=TPESampler(seed=args.seed),
     )
     objective = Objective(args, completed, csv_path)
+    # catch=(Exception,): a failed trial (e.g. OOM at a big width) records as
+    # FAIL and the search continues. Without it Optuna re-raises and one bad
+    # trial kills the whole study. KeyboardInterrupt still aborts (BaseException).
     study.optimize(objective, n_trials=args.n_trials, timeout=args.timeout,
-                   gc_after_trial=True)
+                   gc_after_trial=True, catch=(Exception,))
 
     best = study.best_trial
     print("\n" + "=" * 70)
