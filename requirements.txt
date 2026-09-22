@@ -17,3 +17,4 @@ numpy
 huggingface_hub
 scipy
 psutil
+optuna  # bayes_search.py only (Bayesian TPE grid search)
