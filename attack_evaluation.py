@@ -88,6 +88,9 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
             'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
             'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
             'Lat': res['Latency_ms'], 'RAM': res['PeakRAM_MB'],
+            # I record throughput here because the 5-seed runner needs the
+            # same cost columns for every row.
+            'Thr': res['Throughput'], 'N': res['N'],
         })
 
         print("\n" + "=" * 85)

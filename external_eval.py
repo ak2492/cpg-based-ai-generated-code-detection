@@ -53,13 +53,24 @@ def _load_both(ctx, device, language):
     return m_clean, m_adv
 
 
-def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50):
+def _load_variant(ctx, device, language, variant="both"):
+    """Load only the requested variant(s) so single-variant runs (e.g. a
+    clean-only 5-seed loop) never require the other checkpoint file."""
+    m_clean = m_adv = None
+    if variant in ("both", "clean"):
+        m_clean, _ = build_encoder_from_checkpoint(ctx, CLEAN_CHECKPOINT[language], device)
+    if variant in ("both", "adv"):
+        m_adv, _ = build_encoder_from_checkpoint(ctx, ADV_CHECKPOINT[language], device)
+    return m_clean, m_adv
+
+
+def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["python"]
-    model_clean, model_adv = _load_both(ctx, device, "python")
+    model_clean, model_adv = _load_variant(ctx, device, "python", variant)
 
     print("\n" + "=" * 85)
     print(f"EXTERNAL EVALUATION: SemEval-2026 Task 13 Python (Subtask {subtask_name})")
@@ -88,7 +99,7 @@ def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch
 
     if n_h == 0 or n_a == 0:
         print(f"[!] Insufficient Python samples: {n_h} Human, {n_a} AI. Skipping.")
-        return
+        return {"clean": None, "adv": None}
 
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(SEED).shuffle(balanced)
@@ -101,34 +112,37 @@ def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch
 
     if len(semeval_graphs) == 0:
         print("[!] No Python graphs parsed successfully.")
-        return
+        return {"clean": None, "adv": None}
 
     apply_normalization(semeval_graphs, ctx)
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-
+    res_m1 = res_m2 = None
     print("\n" + "-" * 85)
     print(f"SEMEVAL SUBTASK {subtask_name} PYTHON RESULTS")
     print("-" * 85)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
-    print("-" * 85)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "clean"):
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+        print("-" * 85)
+    if variant in ("both", "adv"):
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced, semeval_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
-def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50):
+def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["java"]
-    model_clean, model_adv = _load_both(ctx, device, "java")
+    model_clean, model_adv = _load_variant(ctx, device, "java", variant)
 
     print("\n" + "=" * 85)
     print(f"EXTERNAL EVALUATION: SemEval-2026 Task 13 (Subtask {subtask_name})")
@@ -167,29 +181,32 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
 
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-
+    res_m1 = res_m2 = None
     print("\n" + "-" * 85)
     print(f"SEMEVAL SUBTASK {subtask_name} RESULTS")
     print("-" * 85)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
-    print("-" * 85)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "clean"):
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+        print("-" * 85)
+    if variant in ("both", "adv"):
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced, semeval_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
-def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50):
+def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["cpp"]
-    model_clean, model_adv = _load_both(ctx, device, "cpp")
+    model_clean, model_adv = _load_variant(ctx, device, "cpp", variant)
 
     print("\n" + "=" * 85)
     print(f"EXTERNAL EVALUATION: SemEval-2026 Task 13 C++ (Subtask {subtask_name})")
@@ -224,7 +241,7 @@ def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_si
 
     if n_h == 0 or n_a == 0:
         print(f"[!] Insufficient C++ samples extracted: {n_h} Human, {n_a} AI. Skipping.")
-        return
+        return {"clean": None, "adv": None}
 
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(SEED).shuffle(balanced)
@@ -237,33 +254,36 @@ def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_si
 
     if len(semeval_graphs) == 0:
         print("[!] No C++ graphs parsed successfully.")
-        return
+        return {"clean": None, "adv": None}
 
     apply_normalization(semeval_graphs, ctx)
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-
+    res_m1 = res_m2 = None
     print("\n" + "-" * 85)
     print(f"SEMEVAL SUBTASK {subtask_name} C++ RESULTS")
     print("-" * 85)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
-    print("-" * 85)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "clean"):
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+        print("-" * 85)
+    if variant in ("both", "adv"):
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del raw_ds, filtered_ds, human_samples, ai_samples, balanced, semeval_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50):
+def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50, variant="both"):
     from huggingface_hub import hf_hub_download
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["python"]
-    model_clean, model_adv = _load_both(ctx, device, "python")
+    model_clean, model_adv = _load_variant(ctx, device, "python", variant)
 
     print("\n" + "=" * 85)
     print("EXTERNAL OOD EVALUATION: HMCorp Dataset (Python)")
@@ -277,7 +297,7 @@ def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50):
         )
     except Exception as e:
         print(f"[!] Failed to download HMCorp Python dataset: {e}")
-        return
+        return {"clean": None, "adv": None}
 
     human_samples, ai_samples = [], []
     with open(file_path, "r", encoding="utf-8") as f:
@@ -309,31 +329,35 @@ def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50):
 
     if len(hmcorp_graphs) == 0:
         print("[!] No Python graphs parsed successfully.")
-        return
+        return {"clean": None, "adv": None}
 
     apply_normalization(hmcorp_graphs, ctx)
     loader = DataLoader(hmcorp_graphs, batch_size=batch_size, shuffle=False)
 
-    print("\nEvaluating Model 1: Clean Baseline Python GNN")
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+    res_m1 = res_m2 = None
+    if variant in ("both", "clean"):
+        print("\nEvaluating Model 1: Clean Baseline Python GNN")
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
 
-    print("\nEvaluating Model 2: Adversarial Python GNN")
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "adv"):
+        print("\nEvaluating Model 2: Adversarial Python GNN")
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del human_samples, ai_samples, balanced_samples, hmcorp_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50):
+def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50, variant="both"):
     from huggingface_hub import hf_hub_download
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["java"]
-    model_clean, model_adv = _load_both(ctx, device, "java")
+    model_clean, model_adv = _load_variant(ctx, device, "java", variant)
 
     print("\n" + "=" * 85)
     print("EXTERNAL OOD EVALUATION: HMCorp Dataset (Java)")
@@ -347,7 +371,7 @@ def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50):
         )
     except Exception as e:
         print(f"[!] Failed to download HMCorp Java dataset: {e}")
-        return
+        return {"clean": None, "adv": None}
 
     human_samples, ai_samples = [], []
     with open(file_path, "r", encoding="utf-8") as f:
@@ -382,30 +406,34 @@ def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50):
 
     if len(hmcorp_graphs) == 0:
         print("[!] No Java graphs parsed successfully.")
-        return
+        return {"clean": None, "adv": None}
 
     apply_normalization(hmcorp_graphs, ctx)
     loader = DataLoader(hmcorp_graphs, batch_size=batch_size, shuffle=False)
 
-    print("\nEvaluating Model 1: Clean Baseline Java GNN")
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+    res_m1 = res_m2 = None
+    if variant in ("both", "clean"):
+        print("\nEvaluating Model 1: Clean Baseline Java GNN")
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
 
-    print("\nEvaluating Model 2: Adversarial Java GNN")
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "adv"):
+        print("\nEvaluating Model 2: Adversarial Java GNN")
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del human_samples, ai_samples, balanced_samples, hmcorp_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50):
+def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50, variant="both"):
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["java"]
-    model_clean, model_adv = _load_both(ctx, device, "java")
+    model_clean, model_adv = _load_variant(ctx, device, "java", variant)
 
     print("\n" + "=" * 85)
     print("EXTERNAL 2023-ERA EVALUATION: GPTSniffer Dataset (Java - Dual Model)")
@@ -453,23 +481,27 @@ def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50):
 
     if len(sniffer_graphs) == 0:
         print("[!] No GPTSniffer graphs successfully parsed.")
-        return
+        return {"clean": None, "adv": None}
 
     apply_normalization(sniffer_graphs, ctx)
     loader = DataLoader(sniffer_graphs, batch_size=batch_size, shuffle=False)
 
-    print("\n--- Evaluating Model 1: Clean Baseline Java GNN ---")
-    res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
+    res_m1 = res_m2 = None
+    if variant in ("both", "clean"):
+        print("\n--- Evaluating Model 1: Clean Baseline Java GNN ---")
+        res_m1 = execute_model_eval_with_cost(model_clean, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 1 (Clean Baseline)", res_m1)
 
-    print("\n--- Evaluating Model 2: Adversarial Java GNN ---")
-    res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
-    print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
+    if variant in ("both", "adv"):
+        print("\n--- Evaluating Model 2: Adversarial Java GNN ---")
+        res_m2 = execute_model_eval_with_cost(model_adv, loader, device, threshold=threshold)
+        print_detailed_metrics_with_cost("Model 2 (Adversarial GNN)", res_m2)
 
     del human_samples, ai_samples, balanced_samples, sniffer_graphs, loader
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    return {"clean": res_m1, "adv": res_m2}
 
 
 if __name__ == "__main__":
@@ -480,6 +512,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.50)
     parser.add_argument("--base_seed", type=int, default=42)
+    parser.add_argument("--variant", type=str, default="both", choices=["both", "clean", "adv"],
+                        help="Which checkpoint(s) to evaluate (both = notebook behavior)")
     args = parser.parse_args()
 
     set_seed(args.base_seed)
@@ -489,11 +523,11 @@ if __name__ == "__main__":
 
     def _run_semeval(subtask, multiclass):
         if args.language == "python":
-            run_external_semeval_python(bundle, subtask, multiclass, args.batch_size, args.threshold)
+            run_external_semeval_python(bundle, subtask, multiclass, args.batch_size, args.threshold, args.variant)
         elif args.language == "java":
-            run_external_semeval_java(bundle, subtask, multiclass, args.batch_size, args.threshold)
+            run_external_semeval_java(bundle, subtask, multiclass, args.batch_size, args.threshold, args.variant)
         else:
-            run_external_semeval_cpp(bundle, subtask, multiclass, args.batch_size, args.threshold)
+            run_external_semeval_cpp(bundle, subtask, multiclass, args.batch_size, args.threshold, args.variant)
 
     if args.suite in ("semeval_A", "all"):
         _run_semeval("A", False)
@@ -501,14 +535,14 @@ if __name__ == "__main__":
         _run_semeval("B", True)
     if args.suite in ("hmcorp", "all"):
         if args.language == "python":
-            evaluate_hmcorp_python(bundle, args.batch_size, args.threshold)
+            evaluate_hmcorp_python(bundle, args.batch_size, args.threshold, args.variant)
         elif args.language == "java":
-            evaluate_hmcorp_java(bundle, args.batch_size, args.threshold)
+            evaluate_hmcorp_java(bundle, args.batch_size, args.threshold, args.variant)
         else:
             print("[!] HMCorp OOD is not defined for C++ in the notebooks; skipping.")
     if args.suite in ("gptsniffer", "all"):
         if args.language == "java":
-            evaluate_gptsniffer(bundle, args.batch_size, args.threshold)
+            evaluate_gptsniffer(bundle, args.batch_size, args.threshold, args.variant)
         elif args.suite == "gptsniffer":
             print("[!] GPTSniffer is Java-only in the notebooks; skipping.")
     if args.language == "python" and args.suite == "all":
