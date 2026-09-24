@@ -65,7 +65,7 @@ LOADED_MSG = {
 }
 
 
-def prepare_graphs(language="python", trial_samples=None, limit=None, adversarial=False):
+def prepare_graphs(language="python", trial_samples=None, limit=None, adversarial=False, seed=SEED):
     """Full Cell-1 pipeline. `limit` caps balanced splits for quick debugging (None = notebook exact).
 
     The adversarial pool (augmentation + adv graph parsing, ~40% of Cell-1
@@ -73,8 +73,12 @@ def prepare_graphs(language="python", trial_samples=None, limit=None, adversaria
     `main.py --adversarial`. Without the flag, `train_adv_*` entries are None
     and only clean/val/test splits are normalized (normalization is always
     fit on clean, so those outputs are bit-identical either way).
+
+    I seed model RNG from `seed` here but keep data splits locked at SEED
+    below, because I want 5-seed averages to compare identical rows with
+    only init/shuffle/dropout varying.
     """
-    _seed_everything()
+    seed_everything(seed)
     print(f"Loading full {language.capitalize()} dataset from Hugging Face..."
           if language != "cpp" else "Loading full C++ dataset from Hugging Face...")
 
@@ -83,6 +87,7 @@ def prepare_graphs(language="python", trial_samples=None, limit=None, adversaria
 
     parser, _ = get_parser(language)
 
+    # Data splits stay locked at SEED even when seed varies (see docstring).
     train_clean_data = balanced_subset(train_data, SEED)
     val_eval_data = balanced_subset(val_data, SEED + 1)
 
@@ -193,6 +198,19 @@ def load_bundle(language, path=None):
         payload = torch.load(path, map_location="cpu")
     if payload.get("language", language) != language:
         raise ValueError(f"Bundle language mismatch: file holds '{payload.get('language')}', requested '{language}'.")
+    # I check dims here because stale 34-d/16-d bundles fail later with
+    # cryptic matmul/load_state_dict errors; rebuilding is the fix.
+    _probe = (payload.get("train_clean_graphs") or payload.get("val_graphs") or payload.get("test_graphs") or [None])[0]
+    if _probe is not None:
+        try:
+            _sd, _gd = int(_probe.x_struct.shape[1]), int(_probe.global_stats.shape[1])
+        except Exception:
+            _sd, _gd = -1, -1
+        if _sd != 28 or _gd != 37:
+            raise ValueError(
+                f"Stale bundle dims in {path}: x_struct={_sd}, global_stats={_gd}; "
+                f"expected 28/37 after the feature overhaul. Rerun `python main.py --language {language}` "
+                f"(same trial_samples/limit) and retrain before eval/attacks.")
 
     parser, _ = get_parser(language)
     ctx = GraphContext(
@@ -236,14 +254,14 @@ def load_test_raw_rows(language):
     return test_data
 
 
-def load_audit_raw_rows(language, trial_samples=None, limit=None):
+def load_audit_raw_rows(language, trial_samples=None, limit=None, seed=SEED):
     """Reload raw rows for the leakage audit (no graph building).
 
     Mirrors the raw-data half of prepare_graphs, including the 20%+20%
     adversarial augmentation when present in the saved bundle.
     """
     from augment import generate_adversarial_augmentations
-    _seed_everything()
+    seed_everything(seed)
     train_data, val_data, test_data = load_magecode_splits(language, trial_samples=trial_samples)
     train_clean_data = balanced_subset(train_data, SEED)
     val_eval_data = balanced_subset(val_data, SEED + 1)
@@ -268,16 +286,17 @@ def load_audit_raw_rows(language, trial_samples=None, limit=None):
     }
 
 
-def build_adv_only(language, trial_samples=None, limit=None):
+def build_adv_only(language, trial_samples=None, limit=None, seed=SEED):
     """Build ONLY the adversarial pool + adv graphs, reusing a clean bundle.
 
     Requires `python main.py --language X` (same trial_samples/limit) to have
     run first: vocab, BPE tokenizer, and clean-locked normalization are reused
     untouched, so clean outputs stay bit-identical and adv outputs match the
     full-build path exactly. Only `train_adv_data` is parsed here.
+    Data rows stay locked at SEED; `seed` only drives augmentation sampling.
     """
     from augment import generate_adversarial_augmentations
-    seed_everything()
+    seed_everything(seed)
 
     bundle = load_bundle(language)
     if (bundle.get("trial_samples"), bundle.get("limit")) != (trial_samples, limit):

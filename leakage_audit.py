@@ -44,13 +44,13 @@ def compute_split_hashes(split_name, dataset_iterable, normalize_fn=None):
     return hashes
 
 
-def run_audit(language="python", trial_samples=None, limit=None):
+def run_audit(language="python", trial_samples=None, limit=None, seed=42):
     label = {"python": "PYTHON", "cpp": "C++", "java": "JAVA"}[language]
     print("\n" + "=" * 70)
     print(f"{label} DATA LEAKAGE & CONTAMINATION AUDIT (SHA256)")
     print("=" * 70)
 
-    bundle = load_audit_raw_rows(language, trial_samples=trial_samples, limit=limit)
+    bundle = load_audit_raw_rows(language, trial_samples=trial_samples, limit=limit, seed=seed)
     norm_fn = {"python": normalize_python_for_hashing,
                "cpp": normalize_cpp_for_hashing,
                "java": normalize_java_for_hashing}[language]
@@ -95,5 +95,7 @@ if __name__ == "__main__":
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--trial-samples", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global RNG seed (audit rows follow the same seed as main.py)")
     args = parser.parse_args()
-    run_audit(args.language, args.trial_samples, args.limit)
+    run_audit(args.language, args.trial_samples, args.limit, args.seed)

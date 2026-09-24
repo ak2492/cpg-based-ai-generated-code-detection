@@ -16,11 +16,11 @@ import argparse
 from pipeline import prepare_graphs, save_bundle, build_adv_only
 
 
-def run_extraction(language="python", trial_samples=None, limit=None, adversarial=False):
+def run_extraction(language="python", trial_samples=None, limit=None, adversarial=False, seed=42):
     if adversarial:
-        return build_adv_only(language, trial_samples=trial_samples, limit=limit)
+        return build_adv_only(language, trial_samples=trial_samples, limit=limit, seed=seed)
     bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit,
-                            adversarial=False)
+                            adversarial=False, seed=seed)
     path = save_bundle(bundle, trial_samples=trial_samples, limit=limit)
     n_clean = len(bundle["train_clean_graphs"])
     print(f"Extraction complete: clean={n_clean} "
@@ -37,7 +37,9 @@ if __name__ == "__main__":
                         help="Mirror notebook TRIAL_SAMPLES (shuffle+select raw splits)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Cap balanced splits for quick debugging (None = notebook exact)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global RNG seed (model init/shuffle/dropout); data splits stay locked for comparability")
     args = parser.parse_args()
 
     run_extraction(language=args.language, trial_samples=args.trial_samples,
-                   limit=args.limit, adversarial=args.adversarial)
+                   limit=args.limit, adversarial=args.adversarial, seed=args.seed)

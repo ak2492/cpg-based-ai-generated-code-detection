@@ -163,15 +163,16 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                 type_dim=64, subword_dim=128, hidden_dim=256,
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
-                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15):
+                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42):
     """Train one model from the saved bundle. Never builds CPGs.
 
     Seeds first so the DataLoader shuffle / dropout / token-masking trajectory
     matches the notebook, where Cell 1 seeding carries over into Cells 3/4 in
     the same process. Without this, the split processes diverge and test
-    accuracy shifts by ~1pt on identical code.
+    accuracy shifts by ~1pt on identical code. I expose `seed` because I want
+    5-seed averages (42-46) over identical data and bundles.
     """
-    seed_everything()
+    seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
@@ -229,13 +230,15 @@ if __name__ == "__main__":
     parser.add_argument("--adversarial", action="store_true",
                         help="Train the adversarially augmented variant (token masking on)")
     parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
     parser = _add_hyper_args(parser)
     args = parser.parse_args()
 
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size,
-                adversarial=args.adversarial, patience=args.patience,
+                adversarial=args.adversarial, patience=args.patience, seed=args.seed,
                 lr=args.lr, weight_decay=args.weight_decay, tmax=args.tmax, eta_min=args.eta_min,
                 accum_steps=args.accum_steps, smooth_pos=args.smooth_pos, smooth_neg=args.smooth_neg,
                 grad_clip=args.grad_clip, threshold=args.threshold,

@@ -157,7 +157,7 @@ class Objective:
                 language=self.args.language, epochs=self.args.epochs,
                 adversarial=self.args.adversarial,
                 tmax=self.args.epochs,  # notebook convention: T_max = epochs
-                smooth_neg=smooth_neg, threshold=0.50, **params)
+                smooth_neg=smooth_neg, threshold=0.50, seed=self.args.seed, **params)
             # Destroy the model reference FIRST: train_model already saved
             # the .pth to disk, and everything below (copy, cache flush)
             # is useless while the graph is still anchored to a local.
@@ -192,6 +192,12 @@ def winner_command(args, params):
         parts.append("--adversarial")
     if args.epochs != 45:
         parts.append(f"--epochs {args.epochs}")
+    # I emit --seed and the derived --smooth_neg here because refitting
+    # without them silently falls back to defaults and will not reproduce
+    # the winning trial.
+    parts.append(f"--seed {args.seed}")
+    if "smooth_pos" in params:
+        parts.append(f"--smooth_neg {round(1.0 - params['smooth_pos'], 3)}")
     for k in sorted(params):
         v = params[k]
         if k == "batch_size" and v == DEFAULT_BATCH_SIZE[args.language]:

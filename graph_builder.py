@@ -38,7 +38,7 @@ def shannon_entropy(s):
 
 
 # ---------------------------------------------------------------------------
-# Node stylometry (34-d). Bodies are exact copies of each notebook; dispatcher
+# Node stylometry (28-d after removing old 11/21/22/31/32/33). Dispatcher
 # combines them under one signature without changing any output.
 # ---------------------------------------------------------------------------
 
@@ -54,22 +54,24 @@ def _stylometry_python(node, text, depth, source_lines, token_to_rank, max_rank,
     is_snake = 1.0 if text and RE_SNAKE.match(text) else 0.0
     is_camel = 1.0 if text and RE_CAMEL.match(text) else 0.0
     is_pascal = 1.0 if text and RE_PASCAL.match(text) else 0.0
-    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
+    # I guard short lines here because empty line_text would IndexError below on Kaggle.
+    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and len(line_text) > 0 and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
 
+    # I removed old 11/21/22/31/32/33 here (28-d): multiline is redundant
+    # with line_span, has_error is near-constant, per-node shannon moved to
+    # file-level macros, ternary/compound/parent-repeat showed no ablation
+    # signal. Kept order otherwise so old index map stays documented above.
     return [
         float(depth), float(len(node.children)), 1.0 if depth == 0 else 0.0, 1.0 if len(node.children) == 0 else 0.0,
         1.0 if node.type in control_triggers else 0.0, line_span, char_len,
         float(start_col), (start_col % 4) / 4.0, float(len(line_text)), 1.0 if line_text.endswith((' ', '\t')) else 0.0,
-        1.0 if line_span > 1.0 else 0.0, is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
+        is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
         sum(c in 'aeiouAEIOU' for c in text) / max(1, len(text)) if text else 0.0, 1.0 if text and len(text) == 1 else 0.0,
         1.0 if 'type' in node.type else 0.0, 1.0 if 'string' in node.type else 0.0, 1.0 if ('subscript' in node.type or 'array' in node.type) else 0.0,
-        1.0 if node.has_error else 0.0, shannon_entropy(text), len(set(text)) / len(text) if text else 0.0,
+        len(set(text)) / len(text) if text else 0.0,
         math.log1p(token_to_rank.get(text, max_rank)) if text else 0.0, 1.0 if (node.type == 'identifier' and text and text.lower() in LAZY_IDENTIFIERS) else 0.0,
         is_unspaced_op, 1.0 if (('number' in node.type or 'integer' in node.type or 'float' in node.type) and text and (text not in MAGIC_NUM_EXCLUSIONS)) else 0.0,
         1.0 if node.type in DECISION_TYPES["python"] else 0.0, float(depth) / MAX_AST_DEPTH, float(sibling_idx) / max(1.0, float(num_siblings - 1)),
-        1.0 if node.type in {'conditional_expression', 'ternary_expression'} else 0.0,
-        1.0 if (text in {'+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', '++', '--'} or 'compound_assignment' in node.type or 'augmented_assignment' in node.type) else 0.0,
-        1.0 if (parent_type and parent_type == node.type) else 0.0
     ]
 
 
@@ -84,22 +86,20 @@ def _stylometry_cpp(node, text, depth, source_lines, token_to_rank, max_rank, si
     is_snake = 1.0 if text and RE_SNAKE.match(text) else 0.0
     is_camel = 1.0 if text and RE_CAMEL.match(text) else 0.0
     is_pascal = 1.0 if text and RE_PASCAL.match(text) else 0.0
-    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
+    # I guard short lines here because empty line_text would IndexError below on Kaggle.
+    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and len(line_text) > 0 and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
 
     return [
         float(depth), float(len(node.children)), 1.0 if depth == 0 else 0.0, 1.0 if len(node.children) == 0 else 0.0,
         1.0 if node.type in control_triggers else 0.0, line_span, char_len,
         float(start_col), (start_col % 4) / 4.0, float(len(line_text)), 1.0 if line_text.endswith((' ', '\t')) else 0.0,
-        1.0 if line_span > 1.0 else 0.0, is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
+        is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
         sum(c in 'aeiouAEIOU' for c in text) / max(1, len(text)) if text else 0.0, 1.0 if text and len(text) == 1 else 0.0,
         1.0 if 'type' in node.type else 0.0, 1.0 if 'string' in node.type else 0.0, 1.0 if ('subscript' in node.type or 'array' in node.type) else 0.0,
-        1.0 if node.has_error else 0.0, shannon_entropy(text), len(set(text)) / len(text) if text else 0.0,
+        len(set(text)) / len(text) if text else 0.0,
         math.log1p(token_to_rank.get(text, max_rank)) if text else 0.0, 1.0 if (node.type == 'identifier' and text and text.lower() in LAZY_IDENTIFIERS) else 0.0,
         is_unspaced_op, 1.0 if (('number' in node.type and text and (text not in MAGIC_NUM_EXCLUSIONS))) else 0.0,
         1.0 if node.type in DECISION_TYPES["cpp"] else 0.0, float(depth) / MAX_AST_DEPTH, float(sibling_idx) / max(1.0, float(num_siblings - 1)),
-        1.0 if node.type in {'conditional_expression', 'ternary_expression'} else 0.0,
-        1.0 if (text in {'+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', '++', '--'} or 'compound_assignment' in node.type) else 0.0,
-        1.0 if (parent_type and parent_type == node.type) else 0.0
     ]
 
 
@@ -112,21 +112,20 @@ def _stylometry_java(node, text, depth, source_lines, token_to_rank, max_rank, s
     is_snake = 1.0 if text and RE_SNAKE.match(text) else 0.0
     is_camel = 1.0 if text and RE_CAMEL.match(text) else 0.0
     is_pascal = 1.0 if text and RE_PASCAL.match(text) else 0.0
-    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
+    # I guard short lines here because empty line_text would IndexError below on Kaggle.
+    is_unspaced_op = 1.0 if text and text in {'=', '==', '!=', '<=', '>=', '+=', '-=', '*=', '/='} and len(line_text) > 0 and (line_text[max(0, start_col - 1)] != ' ' or line_text[min(len(line_text) - 1, end_col)] != ' ') else 0.0
 
     return [
         float(depth), float(len(node.children)), 1.0 if depth == 0 else 0.0, 1.0 if len(node.children) == 0 else 0.0,
         1.0 if node.type in control_triggers else 0.0, float(end_row - start_row + 1), float(node.end_byte - node.start_byte),
         float(start_col), (start_col % 4) / 4.0, float(len(line_text)), 1.0 if line_text.endswith((' ', '\t')) else 0.0,
-        1.0 if (end_row - start_row + 1) > 1.0 else 0.0, is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
+        is_snake, is_camel, is_pascal, float(text.count('_')) if text else 0.0,
         sum(c in 'aeiouAEIOU' for c in text) / max(1, len(text)) if text else 0.0, 1.0 if text and len(text) == 1 else 0.0,
         1.0 if 'type' in node.type else 0.0, 1.0 if 'string' in node.type else 0.0, 1.0 if 'array_access' in node.type else 0.0,
-        1.0 if node.has_error else 0.0, shannon_entropy(text), len(set(text)) / len(text) if text else 0.0,
+        len(set(text)) / len(text) if text else 0.0,
         math.log1p(token_to_rank.get(text, max_rank)) if text else 0.0, 1.0 if node.type == 'identifier' and text and text.lower() in LAZY_IDENTIFIERS else 0.0,
         is_unspaced_op, 1.0 if 'literal' in node.type and text and text not in MAGIC_NUM_EXCLUSIONS else 0.0,
         1.0 if node.type in DECISION_TYPES["java"] else 0.0, float(depth) / MAX_AST_DEPTH, float(sibling_idx) / max(1.0, float(num_siblings - 1)),
-        1.0 if node.type == 'ternary_expression' else 0.0, 1.0 if (text in {'+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', '++', '--'} or 'assignment_expression' in node.type) else 0.0,
-        1.0 if parent_type == node.type else 0.0
     ]
 
 
@@ -140,7 +139,9 @@ def extract_node_stylometry(node, text, depth, source_lines, token_to_rank, max_
 
 
 # ---------------------------------------------------------------------------
-# Macro features (16-d). Exact per-notebook bodies.
+# Macro features (37-d: 16 base + 21 file-level rates). Base bodies keep
+# per-notebook logic with new struct indices (case 12-14->11-13, decision
+# 28->25); the 21 extended rates are shared across languages below.
 # ---------------------------------------------------------------------------
 
 def _macro_python(source_code, source_lines, nodes_info):
@@ -148,9 +149,9 @@ def _macro_python(source_code, source_lines, nodes_info):
     non_empty_lines = [l for l in source_lines if l.strip()]
     num_non_empty = max(1, len(non_empty_lines))
 
-    snake_c = sum(1 for n in nodes_info if n['struct'][12] == 1.0)
-    camel_c = sum(1 for n in nodes_info if n['struct'][13] == 1.0)
-    pascal_c = sum(1 for n in nodes_info if n['struct'][14] == 1.0)
+    snake_c = sum(1 for n in nodes_info if n['struct'][11] == 1.0)
+    camel_c = sum(1 for n in nodes_info if n['struct'][12] == 1.0)
+    pascal_c = sum(1 for n in nodes_info if n['struct'][13] == 1.0)
     total_c = snake_c + camel_c + pascal_c
     case_consistency = max(snake_c, camel_c, pascal_c) / float(max(1, total_c))
 
@@ -165,7 +166,7 @@ def _macro_python(source_code, source_lines, nodes_info):
     total_comments = sum(1 for n in nodes_info if 'comment' in n['type'])
     tactical_comment_ratio = float(tactical_comments) / max(1.0, float(total_comments))
 
-    decision_depths = [n['f_depth'] for n in nodes_info if n['struct'][28] == 1.0]
+    decision_depths = [n['f_depth'] for n in nodes_info if n['struct'][25] == 1.0]
     max_nesting_depth = float(max(decision_depths)) if decision_depths else 0.0
     avg_nesting_depth = float(np.mean(decision_depths)) if decision_depths else 0.0
 
@@ -198,7 +199,9 @@ def _macro_python(source_code, source_lines, nodes_info):
 
     funcs = [n for n in nodes_info if n['type'] in {'function_definition', 'method_declaration'}]
     func_max_to_mean_ratio = float(max([f['line_span'] for f in funcs])) / max(1.0, float(np.mean([f['line_span'] for f in funcs]))) if funcs else 1.0
-    param_count = sum(1 for n in nodes_info if n['type'] in {'parameter_declaration', 'parameter', 'identifier'} and n['struct'][33] == 0)
+    # I count params by node type here (old struct[33] parent-repeat flag is
+    # gone); identifiers carrying my is_def flag plus declared param nodes.
+    param_count = sum(1 for n in nodes_info if n['type'] in {'parameter', 'typed_parameter', 'default_parameter'} or (n['type'] == 'identifier' and n.get('is_def')))
     avg_param_count = float(param_count) / max(1.0, float(len(funcs)))
     call_to_def_ratio = float(sum(1 for n in nodes_info if n['type'] in {'call_expression', 'call'})) / max(1.0, float(len(funcs)))
 
@@ -228,13 +231,13 @@ def _macro_cpp(source_code, source_lines, nodes_info):
         blank_intervals.append(cur_interval)
 
     return [
-        max(sum(1 for n in nodes_info if n['struct'][12] == 1.0), sum(1 for n in nodes_info if n['struct'][13] == 1.0), sum(1 for n in nodes_info if n['struct'][14] == 1.0)) / max(1, sum(1 for n in nodes_info if n['struct'][12] == 1.0) + sum(1 for n in nodes_info if n['struct'][13] == 1.0) + sum(1 for n in nodes_info if n['struct'][14] == 1.0)),
+        max(sum(1 for n in nodes_info if n['struct'][11] == 1.0), sum(1 for n in nodes_info if n['struct'][12] == 1.0), sum(1 for n in nodes_info if n['struct'][13] == 1.0)) / max(1, sum(1 for n in nodes_info if n['struct'][11] == 1.0) + sum(1 for n in nodes_info if n['struct'][12] == 1.0) + sum(1 for n in nodes_info if n['struct'][13] == 1.0)),
         float(np.var([ind % 4 for ind in [len(l) - len(l.lstrip(' ')) for l in non_empty]])) if non_empty else 0.0,
         float(np.var([len(l) - len(l.lstrip(' ')) for l in non_empty])) if non_empty else 0.0,
         float(sum(1 for l in source_lines if l.strip().startswith(('//', '/*', '*')))) / float(total_lines),
         float(sum(1 for n in nodes_info if 'comment' in n['type'] and n.get('text') and RE_TACTICAL.search(n['text']))) / max(1.0, float(sum(1 for n in nodes_info if 'comment' in n['type']))),
-        float(max([n['f_depth'] for n in nodes_info if n['struct'][28] == 1.0] + [0.0])),
-        float(np.mean([n['f_depth'] for n in nodes_info if n['struct'][28] == 1.0] + [0.0])),
+        float(max([n['f_depth'] for n in nodes_info if n['struct'][25] == 1.0] + [0.0])),
+        float(np.mean([n['f_depth'] for n in nodes_info if n['struct'][25] == 1.0] + [0.0])),
         float(np.var([len(l) for l in non_empty])) if non_empty else 0.0,
         sum(1 for l in non_empty if len(l) > 80) / max(1, len(non_empty)),
         float(sum(1 for n in nodes_info if n['type'] in {'preproc_def', 'preproc_include'})) / float(total_lines),
@@ -254,13 +257,13 @@ def _macro_java(source_code, source_lines, nodes_info):
     operands = [n.get('text') for n in nodes_info if n['type'] in TEXT_CAPTURE_TYPES["java"]]
 
     return [
-        max(sum(1 for n in nodes_info if n['struct'][12] == 1.0), sum(1 for n in nodes_info if n['struct'][13] == 1.0), sum(1 for n in nodes_info if n['struct'][14] == 1.0)) / max(1, sum(1 for n in nodes_info if n['struct'][12] == 1.0) + sum(1 for n in nodes_info if n['struct'][13] == 1.0) + sum(1 for n in nodes_info if n['struct'][14] == 1.0)),
+        max(sum(1 for n in nodes_info if n['struct'][11] == 1.0), sum(1 for n in nodes_info if n['struct'][12] == 1.0), sum(1 for n in nodes_info if n['struct'][13] == 1.0)) / max(1, sum(1 for n in nodes_info if n['struct'][11] == 1.0) + sum(1 for n in nodes_info if n['struct'][12] == 1.0) + sum(1 for n in nodes_info if n['struct'][13] == 1.0)),
         float(np.var([ind % 4 for ind in [len(l) - len(l.lstrip(' ')) for l in non_empty]])) if non_empty else 0.0,
         float(np.var([len(l) - len(l.lstrip(' ')) for l in non_empty])) if non_empty else 0.0,
         float(sum(1 for l in source_lines if l.strip().startswith(('//', '/*', '*')))) / max(1, len(source_lines)),
         float(sum(1 for n in nodes_info if 'comment' in n['type'] and n.get('text') and RE_TACTICAL.search(n['text']))) / max(1.0, float(sum(1 for n in nodes_info if 'comment' in n['type']))),
-        float(max([n['f_depth'] for n in nodes_info if n['struct'][28] == 1.0] + [0.0])),
-        float(np.mean([n['f_depth'] for n in nodes_info if n['struct'][28] == 1.0] + [0.0])),
+        float(max([n['f_depth'] for n in nodes_info if n['struct'][25] == 1.0] + [0.0])),
+        float(np.mean([n['f_depth'] for n in nodes_info if n['struct'][25] == 1.0] + [0.0])),
         float(np.var([len(l) for l in non_empty])) if non_empty else 0.0,
         sum(1 for l in non_empty if len(l) > 80) / max(1, len(non_empty)),
         float(sum(1 for n in nodes_info if n['type'] in {'import_declaration', 'package_declaration'})) / max(1, len(source_lines)),
@@ -273,13 +276,133 @@ def _macro_java(source_code, source_lines, nodes_info):
     ]
 
 
-def compute_macro_features(source_code, source_lines, nodes_info, language="python"):
-    if language == "java":
-        return _macro_java(source_code, source_lines, nodes_info)
-    elif language == "cpp":
-        return _macro_cpp(source_code, source_lines, nodes_info)
+# I mirror the Hybrid authorship keyword sets here because I want the new
+# keyword_ratio macro to mean the same thing in both folders.
+_KEYWORDS = {
+    "python": {"False", "None", "True", "and", "as", "assert", "async",
+               "await", "break", "class", "continue", "def", "del", "elif",
+               "else", "except", "finally", "for", "from", "global", "if",
+               "import", "in", "is", "lambda", "nonlocal", "not", "or",
+               "pass", "raise", "return", "try", "while", "with", "yield"},
+    "java": {"abstract", "assert", "boolean", "break", "byte", "case",
+             "catch", "char", "class", "const", "continue", "default",
+             "do", "double", "else", "enum", "extends", "final",
+             "finally", "float", "for", "goto", "if", "implements",
+             "import", "instanceof", "int", "interface", "long", "native",
+             "new", "package", "private", "protected", "public", "return",
+             "short", "static", "strictfp", "super", "switch",
+             "synchronized", "this", "throw", "throws", "transient",
+             "try", "void", "volatile", "while", "true", "false", "null"},
+    "cpp": {"alignas", "alignof", "and", "and_eq", "asm", "auto",
+            "bitand", "bitor", "bool", "break", "case", "catch", "char",
+            "char8_t", "char16_t", "char32_t", "class", "compl",
+            "concept", "const", "consteval", "constexpr", "constinit",
+            "const_cast", "continue", "co_await", "co_return",
+            "co_yield", "decltype", "default", "delete", "do", "double",
+            "dynamic_cast", "else", "enum", "explicit", "export",
+            "extern", "false", "float", "for", "friend", "goto", "if",
+            "inline", "int", "long", "mutable", "namespace", "new",
+            "noexcept", "not", "not_eq", "nullptr", "operator", "or",
+            "or_eq", "private", "protected", "public", "register",
+            "reinterpret_cast", "requires", "return", "short", "signed",
+            "sizeof", "static", "static_assert", "static_cast", "struct",
+            "switch", "template", "this", "thread_local", "throw",
+            "true", "try", "typedef", "typeid", "typename", "union",
+            "unsigned", "using", "virtual", "void", "volatile",
+            "wchar_t", "while", "xor", "xor_eq"},
+}
+
+_ID_TYPES = {
+    "python": {"identifier"},
+    "java": {"identifier", "type_identifier"},
+    "cpp": {"identifier", "type_identifier", "field_identifier",
+            "namespace_identifier"},
+}
+
+
+def _extended_file_rates(source_code, source_lines, nodes_info, language="python", func_names=None):
+    """21 file-level rates (macro 16-36) shared across languages.
+
+    I added these from the Hybrid lexical/layout set plus file-level entropy
+    because the 65-feature ablation ranked char/token entropy, TTR and naming
+    rates top in all three languages while per-node shannon (now removed)
+    was noisy. Pure measurement — no code mutation.
+    """
+    func_names = func_names or []
+    id_types = _ID_TYPES.get(language, {"identifier"})
+    ident_texts = [n.get("text") for n in nodes_info
+                   if n.get("type") in id_types and n.get("text")]
+    def_idents = [n.get("text") for n in nodes_info
+                  if n.get("type") == "identifier" and n.get("text") and n.get("is_def")]
+
+    words = re.findall(r"\b\w+\b", source_code)
+    tokens_ws = source_code.split()
+    n_words = max(1, len(words))
+    n_tok = max(1, len(tokens_ws))
+    total_lines = max(1, len(source_lines))
+    chars = max(1, len(source_code))
+
+    char_entropy = float(shannon_entropy(source_code))
+    tok_counts = Counter(tokens_ws)
+    token_entropy = float(-sum((c / n_tok) * math.log2(c / n_tok) for c in tok_counts.values())) if tokens_ws else 0.0
+    type_token_ratio = len(set(words)) / float(n_words)
+
+    avg_var = float(np.mean([len(t) for t in (def_idents or ident_texts)])) if (def_idents or ident_texts) else 0.0
+    avg_func = float(np.mean([len(t) for t in func_names])) if func_names else 0.0
+    n_ident = max(1, len(ident_texts))
+    camel_ratio = sum(1 for t in ident_texts if RE_CAMEL.match(t)) / float(n_ident)
+    snake_ratio = sum(1 for t in ident_texts if RE_SNAKE.match(t)) / float(n_ident)
+    upper_ratio = sum(1 for t in ident_texts if t.isupper()) / float(n_ident)
+    digit_ratio = sum(1 for t in ident_texts if any(c.isdigit() for c in t)) / float(n_ident)
+    keywords = _KEYWORDS.get(language, set())
+    keyword_ratio = sum(1 for w in words if w in keywords) / float(n_words)
+    avg_word_len = float(np.mean([len(w) for w in words])) if words else 0.0
+    str_bytes = sum(len(n.get("text") or "") for n in nodes_info if "string" in (n.get("type") or ""))
+    string_density = float(str_bytes) / float(chars)
+
+    non_empty = [l for l in source_lines if l.strip()]
+    n_non_empty = max(1, len(non_empty))
+    mean_line_len = float(np.mean([len(l) for l in source_lines])) if source_lines else 0.0
+    max_line_len = float(max([len(l) for l in source_lines])) if source_lines else 0.0
+    blank_ratio = sum(1 for l in source_lines if not l.strip()) / float(total_lines)
+    space_ratio = source_code.count(" ") / float(chars)
+    tab_ratio = source_code.count("\t") / max(1.0, float(source_code.count("\t") + source_code.count(" ")))
+    ops = re.findall(r"[=+\-*/<>!&|^%]+", source_code)
+    spaced_ops = len(re.findall(r"\s[=+\-*/<>!&|^%]+\s", source_code))
+    spaced_op_ratio = float(spaced_ops) / max(1.0, float(len(ops)))
+
+    comment_nodes = [n for n in nodes_info if "comment" in (n.get("type") or "")]
+    if language == "python":
+        line_c = sum(1 for n in comment_nodes if n.get("type") == "comment")
+        block_c = 0.0
+    elif language == "java":
+        line_c = sum(1 for n in comment_nodes if n.get("type") == "line_comment")
+        block_c = sum(1 for n in comment_nodes if n.get("type") == "block_comment")
     else:
-        return _macro_python(source_code, source_lines, nodes_info)
+        line_c = sum(1 for n in comment_nodes if (n.get("text") or "").strip().startswith("//"))
+        block_c = sum(1 for n in comment_nodes if not (n.get("text") or "").strip().startswith("//"))
+    line_comment_density = float(line_c) / float(total_lines)
+    block_comment_density = float(block_c) / float(total_lines)
+    mean_comment_len = float(np.mean([len(n.get("text") or "") for n in comment_nodes])) if comment_nodes else 0.0
+
+    return [
+        char_entropy, token_entropy, type_token_ratio,
+        avg_var, avg_func, camel_ratio, snake_ratio,
+        upper_ratio, digit_ratio, keyword_ratio, avg_word_len,
+        string_density, mean_line_len, max_line_len, blank_ratio,
+        space_ratio, tab_ratio, spaced_op_ratio, line_comment_density,
+        block_comment_density, mean_comment_len,
+    ]
+
+
+def compute_macro_features(source_code, source_lines, nodes_info, language="python", func_names=None):
+    if language == "java":
+        base = _macro_java(source_code, source_lines, nodes_info)
+    elif language == "cpp":
+        base = _macro_cpp(source_code, source_lines, nodes_info)
+    else:
+        base = _macro_python(source_code, source_lines, nodes_info)
+    return base + _extended_file_rates(source_code, source_lines, nodes_info, language, func_names)
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +563,23 @@ def build_optimized_ast_graph(source_code, label, ctx):
             else:
                 subwords_list.append([pad_id] * MAX_SUBWORDS)
 
+        # I compute the def-flag up front so I can store it on the node for
+        # file-level var-length rates (and reuse it for def-use edges below).
+        if node.type == 'identifier' and text:
+            if language == "python":
+                _is_def = (parent_type in {'assignment', 'augmented_assignment', 'parameters', 'typed_parameter', 'default_parameter', 'with_item', 'for_statement'} and sibling_idx == 0)
+            elif language == "cpp":
+                _is_def = (parent_type in {'init_declarator', 'parameter_declaration', 'declaration'} or (parent_type == 'assignment_expression' and sibling_idx == 0))
+            else:
+                _is_def = (parent_type in {'variable_declarator', 'formal_parameter', 'local_variable_declaration'} or (parent_type == 'assignment_expression' and sibling_idx == 0))
+        else:
+            _is_def = False
+
         nodes.append({
             'type_id': type_to_id.get(node.type, 0), 'type': node.type,
             'struct': extract_node_stylometry(node, text, depth, source_lines, token_to_rank, max_rank, sibling_idx, num_siblings, parent_type, language),
-            'text': text, 'line_span': float(node.end_point[0] - node.start_point[0] + 1), 'f_depth': float(depth)
+            'text': text, 'line_span': float(node.end_point[0] - node.start_point[0] + 1), 'f_depth': float(depth),
+            'is_def': bool(_is_def),
         })
 
         if node.type == 'identifier' and text:
@@ -606,9 +742,9 @@ def build_optimized_ast_graph(source_code, label, ctx):
     if not nodes or not edges:
         return None
 
-    global_stats = torch.tensor([compute_macro_features(source_code, source_lines, nodes, language)], dtype=torch.float)
+    global_stats = torch.tensor([compute_macro_features(source_code, source_lines, nodes, language, func_names=list(func_registry.keys()))], dtype=torch.float)
     virtual_node_id = len(nodes)
-    virtual_struct = [0.0] * 34
+    virtual_struct = [0.0] * 28
     virtual_struct[2] = 1.0
     nodes.append({'type_id': 0, 'type': 'virtual_node', 'struct': virtual_struct, 'text': None, 'line_span': 0.0, 'f_depth': 0.0})
     subwords_list.append([pad_id] * MAX_SUBWORDS)

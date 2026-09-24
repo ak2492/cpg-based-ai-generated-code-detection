@@ -6,7 +6,7 @@ as an executable GitHub-style module, following the same CLI conventions as
 `AI_Generated_Hybrid_Code_Detection/` (`main.py` / `train.py` / `evaluate.py` /
 `attack_*.py`).
 
-Each language builds 34-d node stylometry + 16-d macro features + BPE subwords
+Each language builds 28-d node stylometry + 37-d macro features + BPE subwords
 into a 16-relation graph (AST parent/child, siblings, use-chains, leaf order,
 virtual node, def-use, CFG, call, arg-param) encoded by a 4-layer gated RGCN
 (`AdvancedASTGraphEncoder`) with FiLM global conditioning.
@@ -104,7 +104,7 @@ Hyperparameter flags (`train.py`; omit any flag for the notebook default):
   `--smooth_pos` 0.975, `--smooth_neg` 0.025, `--grad_clip` 1.0,
   `--threshold` 0.50, `--batch_size` per-language default
 - Locked (no flag; changing them breaks graph/checkpoint compat):
-  `struct_dim=34`, `num_relations=16`, `global_dim=16` (16-d macro stats),
+  `struct_dim=28`, `num_relations=16`, `global_dim=37` (37-d macro stats),
   conv kernel 3, BPE/subword sizes,
   `MAX_NODES`/`MAX_DEPTH`, augmentation rates, attack magnitudes
 - Checkpoints store their `hyperparams`; eval/attack/external rebuild the

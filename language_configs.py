@@ -12,7 +12,11 @@ MAX_VOCAB_SIZE, BPE_VOCAB_SIZE, MAX_SUBWORDS = 350, 6000, 12
 MAX_AST_DEPTH, MAX_AST_NODES, NUM_RELATIONS = 150, 2200, 16
 MAX_SEMEVAL_SAMPLES_PER_CLASS = 3000
 
-CONTINUOUS_IDX = [0, 1, 5, 6, 7, 8, 9, 15, 16, 22, 24, 29, 30]
+# I normalize these continuous node dims (file-level macros are all normalized).
+# Index map after removing old 11/21/22/31/32/33: underscore 15->14, vowel
+# 16->15, rarity 24->21, depth_norm 29->26, sibling 30->27; old 22 (shannon)
+# is gone because I moved entropy to file-level macros.
+CONTINUOUS_IDX = [0, 1, 5, 6, 7, 8, 9, 14, 15, 21, 26, 27]
 
 # Shared (identical in all three notebooks)
 RE_SNAKE = re.compile(r'^[a-z0-9]+(_[a-z0-9]+)+$')
@@ -134,7 +138,13 @@ MACRO_NAMES = [
     "Case Consistency", "Indent Step Var", "Indent Variance", "Comment Ratio",
     "Tactical Comment Ratio", "Max Nesting Depth", "Avg Nesting Depth", "Line Len Variance",
     "Long Line Ratio", "Import Density", "Blank Line Entropy", "Gzip Ratio",
-    "Halstead Volume Log", "Func Max/Mean Ratio", "Avg Param Count", "Call/Def Ratio"
+    "Halstead Volume Log", "Func Max/Mean Ratio", "Avg Param Count", "Call/Def Ratio",
+    "Char Entropy", "Token Entropy", "Type Token Ratio",
+    "Avg Var Name Len", "Avg Func Name Len", "Camel Ratio", "Snake Ratio",
+    "Upper Ratio", "Digit Name Ratio", "Keyword Ratio", "Avg Word Len",
+    "String Density", "Mean Line Len", "Max Line Len", "Blank Ratio",
+    "Space Ratio", "Tab Ratio", "Spaced Op Ratio", "Line Comment Density",
+    "Block Comment Density", "Mean Comment Len",
 ]
 
 
