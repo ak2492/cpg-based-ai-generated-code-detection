@@ -91,6 +91,12 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
         print(f"[resume] kept {len(prev)} existing rows for other configs.")
 
     for seed in seeds:
+        # I start each seed from a clean memory state because 5 seeds of
+        # alloc/free cycles fragment VRAM; the reset also keeps peak stats honest.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
         print("\n" + "=" * 85)
         print(f"SEED {seed} [{language.upper()} {tag}]")
         print("=" * 85)
@@ -107,11 +113,14 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                     best_f1 = float(hit["TrainValF1"].iloc[0])
                     best_roc = float(hit["TrainValROC"].iloc[0])
         else:
-            _, best_f1, best_roc = train_model(
+            trained, best_f1, best_roc = train_model(
                 language=language, epochs=epochs, batch_size=batch_size,
                 adversarial=adversarial, seed=seed)
             shutil.copyfile(ckpt_canon, seed_ckpt)
             print(f"Checkpoint archived -> {seed_ckpt}")
+            # I delete the trained model here because the next seed allocates
+            # a fresh model + optimizer; keeping this alive would double VRAM.
+            del trained
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -135,6 +144,7 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                              adversarial=adversarial, threshold=threshold,
                              seed=seed)
         _row("Clean Test", res)
+        del res
 
         shutil.copyfile(seed_ckpt, ckpt_canon)
         df = run_attack_benchmark(language=language, batch_size=batch_size,
@@ -147,6 +157,7 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                                  "F1": r["F1"], "ROC": r["ROC"], "FPR": r["FPR"],
                                  "Latency_ms": r["Lat"], "Throughput": r["Thr"],
                                  "PeakRAM_MB": r["RAM"], "N": r["N"]})
+        del df
 
         if not skip_external:
             shutil.copyfile(seed_ckpt, ckpt_canon)
@@ -166,6 +177,13 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                     out = ext.evaluate_gptsniffer(bundle, batch_size, threshold, variant)
                 res = (out or {}).get(variant)
                 _row(_scenario_name(suite), res)
+                del out, res
+            # I drop the bundle here because it holds all graph lists; the
+            # next seed reloads it fresh and I want no CPU-RAM overlap.
+            del bundle
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if out_csv:
             pd.DataFrame(rows, columns=COLUMNS).to_csv(out_csv, index=False)
