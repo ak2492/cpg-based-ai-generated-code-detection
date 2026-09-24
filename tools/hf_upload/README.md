@@ -11,15 +11,15 @@ reuses an existing repo.
 !pip -q install -U huggingface_hub
 !python tools/hf_upload/upload_seed_models.py \
     --model-dir /kaggle/working/cpg-based-ai-generated-code-detection \
-    --repo ak2492/cpg_based_detection-models_cpp
+    --repo <owner>/<repo>
 
 # Hybrid (+ scalers):
 !python tools/hf_upload/upload_seed_models.py \
     --model-dir /kaggle/working/AI_Generated_Hybrid_Code_Detection \
-    --repo ak2492/hybrid_detection-models_python \
+    --repo <owner>/<repo> \
     --pattern '*_seed*.pt' --pattern '*_seed*.pkl'
 ```
 
-Repo convention: one repo per language —
-`ak2492/cpg_based_detection-models_{cpp|python|java}`,
-`ak2492/hybrid_detection-models_{cpp|python|java}`.
+Repo is always explicit via `--repo <owner>/<repo>` (no default); one
+repo per language is the recommended convention. Missing repo, token, or
+matching files skips the upload with a warning instead of an error.

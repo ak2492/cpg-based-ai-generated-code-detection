@@ -232,7 +232,9 @@ if __name__ == "__main__":
                         help="Reuse existing *_seed{s}.pth files and keep other configs' CSV rows")
     parser.add_argument("--upload", action="store_true",
                         help="Upload per-seed .pth files to Hugging Face at the end")
-    parser.add_argument("--upload-repo", type=str, default=None)
+    parser.add_argument("--upload-repo", type=str, default=None,
+                        help="Required with --upload: full repo id 'owner/name' (no default; "
+                             "missing repo/token/files skips upload gracefully)")
     args = parser.parse_args()
 
     seeds = parse_seeds(args.seeds)
@@ -251,7 +253,12 @@ if __name__ == "__main__":
         summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 
         if args.upload:
-            repo = args.upload_repo or f"ak2492/cpg_based_detection-models_{lang}"
+            # I require an explicit repo and never default to a personal
+            # account; anything missing is a warned skip, never an error.
+            if not args.upload_repo:
+                print("[!] --upload needs --upload-repo <owner/name>; skipping upload.")
+                continue
             script = os.path.join("tools", "hf_upload", "upload_seed_models.py")
             subprocess.run([sys.executable, script, "--model-dir", ".",
-                            "--repo", repo, "--pattern", "*_seed*.pth"], check=True)
+                            "--repo", args.upload_repo,
+                            "--pattern", "*_seed*.pth"], check=True)
