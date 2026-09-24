@@ -53,7 +53,8 @@ def _model_tag(language, adversarial):
 
 
 def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
-                         base_seed=42, adversarial=False):
+                         base_seed=42, adversarial=False, target="machine"):
+    """Paper Sec 4.7 benchmark: machine-only by default (target='machine')."""
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
@@ -74,7 +75,8 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
         if attack_key == "clean":
             eval_graphs = test_graphs
         else:
-            attack_data = generate_attack_samples(test_raw, attack_key, mode, language, parser)
+            attack_data = generate_attack_samples(test_raw, attack_key, mode, language, parser,
+                                                  base_seed=base_seed, target=target)
             eval_graphs = process_split(attack_data, _parse_desc(language, suite_name), ctx)
             apply_normalization(eval_graphs, ctx)
 
@@ -114,10 +116,9 @@ def run_single_attack(language="python", attack_type="auth", mode="enhanced", ba
                       target="machine", adversarial=False):
     """Single-layer evaluation of exactly one model.
 
-    Notebook rule is preserved exactly: basic attacks ALL samples,
-    enhanced attacks machine-only. `target` is accepted for hybrid-folder
-    CLI compatibility but does not alter notebook outputs. Graphs come from
-    the saved bundle; nothing is rebuilt here.
+    Paper Sec 4.7 protocol: machine-only by default (target='machine');
+    target='all' attacks every sample. BASIC mode is paper-identical
+    (most difficult); graphs are rebuilt from the single-transform code.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -135,7 +136,8 @@ def run_single_attack(language="python", attack_type="auth", mode="enhanced", ba
     if attack_type == "clean":
         eval_graphs = test_graphs
     else:
-        attack_data = generate_attack_samples(test_raw, attack_type, mode, language, parser)
+        attack_data = generate_attack_samples(test_raw, attack_type, mode, language, parser,
+                                              base_seed=base_seed, target=target)
         eval_graphs = process_split(attack_data, _parse_desc(language, f"{attack_type}-{mode}"), ctx)
         apply_normalization(eval_graphs, ctx)
 

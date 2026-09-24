@@ -300,22 +300,32 @@ def fit_vocab_and_tokenizer(train_clean_data, parser, language):
         code = item.get('text', item.get('code', ''))
         if not code:
             continue
-        tree = parser.parse(bytes(code, "utf8"))
+        code_bytes = bytes(code, "utf8")
+        tree = parser.parse(code_bytes)
         stack = [tree.root_node]
         while stack:
             node = stack.pop()
             if node.is_named or 'comment' in node.type:
                 counter[node.type] += 1
                 if node.type in capture:
-                    train_identifiers.append(code[node.start_byte:node.end_byte])
+                    # I decode from bytes here because I think str slicing by
+                    # byte offsets corrupts non-ASCII identifiers.
+                    train_identifiers.append(
+                        code_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore"))
             stack.extend(node.children)
 
     type_to_id = {t: i + 1 for i, t in enumerate([t for t, _ in counter.most_common(MAX_VOCAB_SIZE)])}
     vocab_size = len(type_to_id) + 1
     bpe_tokenizer = Tokenizer(models.BPE(unk_token="[UNK]"))
     bpe_tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    if not train_identifiers:
+        train_identifiers = ["v_1"]
     bpe_tokenizer.train_from_iterator(train_identifiers, trainers.BpeTrainer(special_tokens=["[PAD]", "[UNK]"], vocab_size=BPE_VOCAB_SIZE))
     pad_id = bpe_tokenizer.token_to_id("[PAD]")
+    if pad_id is None:
+        # I fall back to 0 here because I think a missing PAD id should not
+        # crash graph building on Kaggle; the model treats 0 as padding.
+        pad_id = 0
     token_freqs = Counter(train_identifiers)
     token_to_rank = {token: rank + 1 for rank, token in enumerate([k for k, v in token_freqs.most_common()])}
     max_rank = len(token_to_rank) + 1
@@ -358,6 +368,10 @@ def build_optimized_ast_graph(source_code, label, ctx):
 
     if not source_code or not isinstance(source_code, str):
         return None
+    if len(source_code) > 100_000:
+        # I skip oversized snippets here to match the Hybrid 100k guard and
+        # avoid freezing the Kaggle run on deep trees.
+        return None
     try:
         tree = parser.parse(bytes(source_code, "utf8"))
     except Exception:
@@ -365,10 +379,13 @@ def build_optimized_ast_graph(source_code, label, ctx):
 
     source_lines, nodes, edges, edge_types, subwords_list, leaf_order = source_code.splitlines(), [], [], [], [], []
     ast_id_to_node_id, scope_stack, cfg_seqs, func_registry, calls = {}, [{}], [], {}, []
+    source_bytes = bytes(source_code, "utf8")
 
     def get_identifier_text(n):
         if n.type == 'identifier':
-            return source_code[n.start_byte:n.end_byte]
+            # I decode from bytes here because I think str slicing by byte
+            # offsets corrupts non-ASCII names.
+            return source_bytes[n.start_byte:n.end_byte].decode("utf8", errors="ignore")
         for c in n.children:
             res = get_identifier_text(c)
             if res:
@@ -411,7 +428,8 @@ def build_optimized_ast_graph(source_code, label, ctx):
         if is_scope:
             scope_stack.append({})
 
-        text = source_code[node.start_byte:node.end_byte] if node.type in capture else None
+        # I slice bytes here for the same non-ASCII reason as above.
+        text = source_bytes[node.start_byte:node.end_byte].decode("utf8", errors="ignore") if node.type in capture else None
         if language == "java":
             enc = bpe_tokenizer.encode(text).ids[:MAX_SUBWORDS] + [pad_id] * MAX_SUBWORDS if text else [pad_id] * MAX_SUBWORDS
             subwords_list.append(enc[:MAX_SUBWORDS])
