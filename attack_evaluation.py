@@ -22,6 +22,8 @@ from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOIN
 from model import build_encoder_from_checkpoint
 from attack_utils import (
     ATTACK_SUITES,
+    attack_graph_cache_path,
+    build_or_load_graphs,
     generate_attack_samples,
     execute_model_eval_with_cost,
     print_detailed_metrics_with_cost,
@@ -53,8 +55,13 @@ def _model_tag(language, adversarial):
 
 
 def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
-                         base_seed=42, adversarial=False, target="machine"):
-    """Paper Sec 4.7 benchmark: machine-only by default (target='machine')."""
+                         base_seed=42, adversarial=False, target="machine",
+                         graphs_cache_dir=None, rebuild_cache=False):
+    """Paper Sec 4.7 benchmark: machine-only by default (target='machine').
+
+    graphs_cache_dir enables the parse-once .pt cache (None = parse every
+    call, exactly like before); rebuild_cache forces re-parsing.
+    """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
@@ -71,14 +78,25 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
 
     comparison_records = []
 
+    def _cache_path(attack_key, mode):
+        # I return None here when caching is off so suites take their
+        # original uncached path byte-for-byte.
+        if graphs_cache_dir is None:
+            return None
+        return attack_graph_cache_path(language, attack_key, mode, target,
+                                       base_seed, None, graphs_cache_dir)
+
     for suite_name, attack_key, mode in ATTACK_SUITES:
         if attack_key == "clean":
             eval_graphs = test_graphs
+            attack_data = None
         else:
             attack_data = generate_attack_samples(test_raw, attack_key, mode, language, parser,
                                                   base_seed=base_seed, target=target)
-            eval_graphs = process_split(attack_data, _parse_desc(language, suite_name), ctx)
-            apply_normalization(eval_graphs, ctx)
+            eval_graphs = build_or_load_graphs(
+                _cache_path(attack_key, mode), ctx,
+                lambda: process_split(attack_data, _parse_desc(language, suite_name), ctx),
+                rebuild_cache)
 
         eval_loader = DataLoader(eval_graphs, batch_size=batch_size, shuffle=False)
 

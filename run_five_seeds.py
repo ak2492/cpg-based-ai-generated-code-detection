@@ -77,7 +77,8 @@ def _scenario_name(suite):
 
 def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                  threshold=0.50, base_seed=42, skip_external=False,
-                 out_csv=None, resume=False):
+                 out_csv=None, resume=False, graphs_cache_dir=".",
+                 rebuild_cache=False):
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     ckpt_canon, ckpt_tpl = _ckpt_files(language, adversarial)
@@ -149,7 +150,9 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
         shutil.copyfile(seed_ckpt, ckpt_canon)
         df = run_attack_benchmark(language=language, batch_size=batch_size,
                                   threshold=threshold, base_seed=base_seed,
-                                  adversarial=adversarial)
+                                  adversarial=adversarial,
+                                  graphs_cache_dir=graphs_cache_dir,
+                                  rebuild_cache=rebuild_cache)
         for _, r in df.iterrows():
             if r["Scenario"] == "Clean Test":
                 continue  # already covered by evaluate_model above
@@ -169,12 +172,15 @@ def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
                     fn = {"python": ext.run_external_semeval_python,
                           "java": ext.run_external_semeval_java,
                           "cpp": ext.run_external_semeval_cpp}[language]
-                    out = fn(bundle, subtask, multi, batch_size, threshold, variant)
+                    out = fn(bundle, subtask, multi, batch_size, threshold, variant,
+                             graphs_cache_dir, rebuild_cache)
                 elif suite == "hmcorp":
                     fn = ext.evaluate_hmcorp_python if language == "python" else ext.evaluate_hmcorp_java
-                    out = fn(bundle, batch_size, threshold, variant)
+                    out = fn(bundle, batch_size, threshold, variant,
+                             graphs_cache_dir, rebuild_cache)
                 else:
-                    out = ext.evaluate_gptsniffer(bundle, batch_size, threshold, variant)
+                    out = ext.evaluate_gptsniffer(bundle, batch_size, threshold, variant,
+                                                  graphs_cache_dir, rebuild_cache)
                 res = (out or {}).get(variant)
                 _row(_scenario_name(suite), res)
                 del out, res
@@ -228,6 +234,12 @@ if __name__ == "__main__":
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--skip-external", action="store_true")
+    parser.add_argument("--no-feature-cache", action="store_true",
+                        help="Disable the extract-once graph cache (parse every seed)")
+    parser.add_argument("--rebuild-cache", action="store_true",
+                        help="Force re-parsing even when cache files exist")
+    parser.add_argument("--cache-dir", type=str, default=".",
+                        help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",
                         help="Reuse existing *_seed{s}.pth files and keep other configs' CSV rows")
     parser.add_argument("--upload", action="store_true",
@@ -242,13 +254,18 @@ if __name__ == "__main__":
     langs = LANGUAGES if args.language == "all" else [args.language]
     variant = "adv" if args.adversarial else "clean"
 
+    # I pass None (not ".") when caching is off so library code takes its
+    # original uncached path byte-for-byte.
+    graphs_cache_dir = None if args.no_feature_cache else args.cache_dir
     for lang in langs:
         out_csv = f"five_seed_{lang}_{variant}.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
                               epochs=args.epochs, batch_size=args.batch_size,
                               threshold=args.threshold, base_seed=args.base_seed,
                               skip_external=args.skip_external,
-                              out_csv=out_csv, resume=args.resume)
+                              out_csv=out_csv, resume=args.resume,
+                              graphs_cache_dir=graphs_cache_dir,
+                              rebuild_cache=args.rebuild_cache)
         summary = summarize(df_all[df_all["Language"] == lang])
         summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 

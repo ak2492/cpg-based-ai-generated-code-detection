@@ -39,7 +39,9 @@ from torch_geometric.loader import DataLoader
 from language_configs import SEED, DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
 from model import build_encoder_from_checkpoint
 from attack_utils import (
+    build_or_load_graphs,
     execute_model_eval_with_cost,
+    external_graph_cache_path,
     print_detailed_metrics_with_cost,
     set_seed,
 )
@@ -64,7 +66,7 @@ def _load_variant(ctx, device, language, variant="both"):
     return m_clean, m_adv
 
 
-def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
+def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
@@ -105,7 +107,12 @@ def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch
     random.Random(SEED).shuffle(balanced)
 
     print(f"Isolated and balanced {len(balanced)} Python samples: {n_h} Human, {n_a} AI.")
-    semeval_graphs = process_split(balanced, f"Parsing SemEval Subtask {subtask_name} (Python)", ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "python", f"semeval_{subtask_name}", 42, graphs_cache_dir)
+    semeval_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced, f"Parsing SemEval Subtask {subtask_name} (Python)", ctx),
+        rebuild_cache)
 
     dropped_count = len(balanced) - len(semeval_graphs)
     print(f"[!] Python PARSE DROPS: Attempted {len(balanced)}, Parsed {len(semeval_graphs)}, Dropped {dropped_count}")
@@ -114,7 +121,8 @@ def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch
         print("[!] No Python graphs parsed successfully.")
         return {"clean": None, "adv": None}
 
-    apply_normalization(semeval_graphs, ctx)
+    # Normalization already applied inside build_or_load_graphs; a second
+    # pass would corrupt scores because (x-mean)/std is not idempotent.
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
     res_m1 = res_m2 = None
@@ -136,7 +144,7 @@ def run_external_semeval_python(bundle, subtask_name, is_multiclass=False, batch
     return {"clean": res_m1, "adv": res_m2}
 
 
-def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
+def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
@@ -176,8 +184,14 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
     random.Random(SEED).shuffle(balanced)
 
     print(f"Isolated {len(balanced)} balanced Java samples ({n_h} Human, {n_a} AI).")
-    semeval_graphs = process_split(balanced, f"Parsing SemEval Subtask {subtask_name}", ctx)
-    apply_normalization(semeval_graphs, ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "java", f"semeval_{subtask_name}", 42, graphs_cache_dir)
+    semeval_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced, f"Parsing SemEval Subtask {subtask_name}", ctx),
+        rebuild_cache)
+    # Normalization already applied inside build_or_load_graphs; a second
+    # pass would corrupt scores because (x-mean)/std is not idempotent.
 
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
@@ -200,7 +214,7 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
     return {"clean": res_m1, "adv": res_m2}
 
 
-def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both"):
+def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     from datasets import load_dataset
     from language_configs import MAX_SEMEVAL_SAMPLES_PER_CLASS
     ctx = bundle["ctx"]
@@ -247,7 +261,12 @@ def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_si
     random.Random(SEED).shuffle(balanced)
 
     print(f"Isolated and balanced {len(balanced)} C++ samples: {n_h} Human, {n_a} AI.")
-    semeval_graphs = process_split(balanced, f"Parsing SemEval Subtask {subtask_name} (C++)", ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "cpp", f"semeval_{subtask_name}", 42, graphs_cache_dir)
+    semeval_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced, f"Parsing SemEval Subtask {subtask_name} (C++)", ctx),
+        rebuild_cache)
 
     dropped_count = len(balanced) - len(semeval_graphs)
     print(f"[!] C++ PARSE DROPS: Attempted {len(balanced)}, Parsed {len(semeval_graphs)}, Dropped {dropped_count}")
@@ -256,7 +275,8 @@ def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_si
         print("[!] No C++ graphs parsed successfully.")
         return {"clean": None, "adv": None}
 
-    apply_normalization(semeval_graphs, ctx)
+    # Normalization already applied inside build_or_load_graphs; a second
+    # pass would corrupt scores because (x-mean)/std is not idempotent.
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 
     res_m1 = res_m2 = None
@@ -278,7 +298,7 @@ def run_external_semeval_cpp(bundle, subtask_name, is_multiclass=False, batch_si
     return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50, variant="both"):
+def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     from huggingface_hub import hf_hub_download
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -325,13 +345,18 @@ def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50, variant="bot
     random.Random(42).shuffle(balanced_samples)
 
     print(f"Isolated and balanced {len(balanced_samples)} HMCorp Python samples ({len(human_samples)} Human, {len(ai_samples)} AI).")
-    hmcorp_graphs = process_split(balanced_samples, "Parsing HMCorp Python", ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "python", "hmcorp", 42, graphs_cache_dir)
+    hmcorp_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced_samples, "Parsing HMCorp Python", ctx),
+        rebuild_cache)
 
     if len(hmcorp_graphs) == 0:
         print("[!] No Python graphs parsed successfully.")
         return {"clean": None, "adv": None}
 
-    apply_normalization(hmcorp_graphs, ctx)
+    # Normalization already applied inside build_or_load_graphs (see above).
     loader = DataLoader(hmcorp_graphs, batch_size=batch_size, shuffle=False)
 
     res_m1 = res_m2 = None
@@ -352,7 +377,7 @@ def evaluate_hmcorp_python(bundle, batch_size=None, threshold=0.50, variant="bot
     return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50, variant="both"):
+def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     from huggingface_hub import hf_hub_download
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -402,13 +427,18 @@ def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50, variant="both"
     random.Random(42).shuffle(balanced_samples)
 
     print(f"Isolated and balanced {len(balanced_samples)} HMCorp Java samples ({len(human_samples)} Human, {len(ai_samples)} AI).")
-    hmcorp_graphs = process_split(balanced_samples, "Parsing HMCorp Java", ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "java", "hmcorp", 42, graphs_cache_dir)
+    hmcorp_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced_samples, "Parsing HMCorp Java", ctx),
+        rebuild_cache)
 
     if len(hmcorp_graphs) == 0:
         print("[!] No Java graphs parsed successfully.")
         return {"clean": None, "adv": None}
 
-    apply_normalization(hmcorp_graphs, ctx)
+    # Normalization already applied inside build_or_load_graphs (see above).
     loader = DataLoader(hmcorp_graphs, batch_size=batch_size, shuffle=False)
 
     res_m1 = res_m2 = None
@@ -429,7 +459,7 @@ def evaluate_hmcorp_java(bundle, batch_size=None, threshold=0.50, variant="both"
     return {"clean": res_m1, "adv": res_m2}
 
 
-def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50, variant="both"):
+def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50, variant="both", graphs_cache_dir=None, rebuild_cache=False):
     ctx = bundle["ctx"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = batch_size or DEFAULT_BATCH_SIZE["java"]
@@ -477,13 +507,18 @@ def evaluate_gptsniffer(bundle, batch_size=None, threshold=0.50, variant="both")
 
     print(f"Isolated and balanced {len(balanced_samples)} GPTSniffer samples: {n_samples} Human, {n_samples} AI.")
 
-    sniffer_graphs = process_split(balanced_samples, "Parsing GPTSniffer (2023-era Java)", ctx)
+    _cache = None if graphs_cache_dir is None else external_graph_cache_path(
+        "java", "gptsniffer", 42, graphs_cache_dir)
+    sniffer_graphs = build_or_load_graphs(
+        _cache, ctx,
+        lambda: process_split(balanced_samples, "Parsing GPTSniffer (2023-era Java)", ctx),
+        rebuild_cache)
 
     if len(sniffer_graphs) == 0:
         print("[!] No GPTSniffer graphs successfully parsed.")
         return {"clean": None, "adv": None}
 
-    apply_normalization(sniffer_graphs, ctx)
+    # Normalization already applied inside build_or_load_graphs (see above).
     loader = DataLoader(sniffer_graphs, batch_size=batch_size, shuffle=False)
 
     res_m1 = res_m2 = None

@@ -6,10 +6,10 @@ mode are retained separately. Test-time generators
 (generate_python/java/cpp_attack_samples) implement the paper protocol:
 machine-only by default, seeded per-sample RNG, isolated single-layer transforms.
 """
+import os
 import random
 import re
 import time
-
 import numpy as np
 import torch
 from sklearn.metrics import (
@@ -912,6 +912,73 @@ ATTACK_SUITES = [
     ("Full (Basic)", "full", "basic"),
     ("Full (Enhanced)", "full", "enhanced"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Extract-once graph cache (parse once, reuse across training seeds)
+# ---------------------------------------------------------------------------
+# Attacked/external graphs depend only on (bundle, base_seed, mode, target,
+# limit) — never on the training seed — so the parsed graph lists are
+# identical for seeds 42-46. I cache the normalized lists on disk after the
+# first seed; later seeds load them and only redo model inference.
+
+
+def _bundle_mtime(language):
+    # I fingerprint the bundle file because a rebuild (new main.py run) is
+    # the only local event that can change parsed graphs.
+    try:
+        return int(os.path.getmtime(f"{language}_cpg_bundle.pt"))
+    except OSError:
+        return 0
+
+
+def attack_graph_cache_path(language, attack_key, mode, target, base_seed,
+                            limit, cache_dir="."):
+    lim = "full" if limit is None else f"lim{limit}"
+    return os.path.join(
+        cache_dir,
+        f"{language}_graphs_{attack_key}_{mode}_{target}"
+        f"_b{base_seed}_{lim}_m{_bundle_mtime(language)}.pt")
+
+
+def external_graph_cache_path(language, suite, base_seed, cache_dir="."):
+    # External rows are sampled with fixed seeds, so one cache entry per
+    # (language, suite) covers every training seed; base_seed and the bundle
+    # fingerprint stay in the key as insurance.
+    return os.path.join(
+        cache_dir,
+        f"{language}_extgraphs_{suite}_b{base_seed}_m{_bundle_mtime(language)}.pt")
+
+
+def build_or_load_graphs(cache_path, ctx, build_fn, rebuild=False):
+    """Return normalized graphs, loading the .pt cache when valid.
+
+    build_fn() must return the RAW (unnormalized) graph list; normalization
+    with the bundle-locked ctx stats is applied here after every build, so
+    cached lists are always evaluation-ready.
+    """
+    from graph_builder import apply_normalization
+    if cache_path is not None and not rebuild:
+        try:
+            try:
+                graphs = torch.load(cache_path, map_location="cpu", weights_only=False)
+            except TypeError:  # torch < 2.6 without the weights_only kwarg
+                graphs = torch.load(cache_path, map_location="cpu")
+        except (OSError, ValueError, RuntimeError):
+            graphs = None
+        # I validate the payload here because a half-written or foreign .pt
+        # must never silently poison a seed run; anything off forces a rebuild.
+        if graphs is not None and isinstance(graphs, list) and len(graphs) > 0:
+            print(f"  Loaded cached graphs from {cache_path} (no re-parsing)")
+            return graphs
+        if graphs is not None:
+            print(f"  [!] cache at {cache_path} invalid/empty; rebuilding.")
+    graphs = build_fn()
+    apply_normalization(graphs, ctx)
+    if cache_path is not None:
+        torch.save(graphs, cache_path)
+        print(f"  Cached graphs -> {cache_path} (later seeds skip parsing)")
+    return graphs
 
 
 # ---------------------------------------------------------------------------
