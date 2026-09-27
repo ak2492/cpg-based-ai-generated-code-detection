@@ -9,7 +9,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import RGCNConv, global_add_pool, global_max_pool
+from torch_geometric.nn import RGCNConv, global_add_pool, global_max_pool, global_mean_pool
 from torch_geometric.utils import softmax
 
 
@@ -41,26 +41,96 @@ HPARAM_DEFAULTS = {
 }
 
 
+# Ablation configs for the paper study. Each id isolates exactly one
+# architectural decision against `full` (plus the `no-mp` floor). I run all
+# ten on each language, seed 42, clean training only, test-set eval only.
+ABLATION_IDS = (
+    "full",        # 0 reference upper bound
+    "no-mp",       # 1 floor: 0 RGCN layers, projected features only
+    "no-subword",  # 2 drop identifier/token-content branch
+    "no-struct",   # 3 drop hand-engineered per-node stylometry
+    "syntax-only", # 4 keep edge types {0,1,2,3,8}; drop data-flow/CFG/call/next-token
+    "no-gate",     # 5 plain residual x+h instead of learned gate
+    "no-jk",       # 6 last-layer readout instead of multi-scale fusion
+    "no-virtual",  # 7 drop global supernode; pooled AST nodes only
+    "mean-pool",   # 8 mean pooling instead of learned attention pooling
+    "no-film",     # 9 no file-level macro-stat modulation
+)
+
+# Edge types kept by the syntax-only graph variant (parent<->child,
+# siblings, node->virtual). num_relations stays 16 so RGCN capacity is
+# untouched; absent relations simply never appear.
+SYNTAX_ONLY_EDGE_TYPES = frozenset((0, 1, 2, 3, 8))
+
+# Graph variants each ablation needs. Only syntax-only and no-virtual change
+# graph construction; the other seven reuse the standard parsed graphs, so
+# test-set extraction happens once per language and is never repeated.
+GRAPH_VARIANT_FOR_ABLATION = {
+    "syntax-only": "syntax-only",
+    "no-virtual": "no-virtual",
+}
+GRAPH_VARIANTS = ("standard", "syntax-only", "no-virtual")
+
+
+def graph_variant_for_ablation(ablation):
+    """Return the graph variant an ablation id trains/evaluates on."""
+    if ablation not in ABLATION_IDS:
+        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    return GRAPH_VARIANT_FOR_ABLATION.get(ablation, "standard")
+
+
 class AdvancedASTGraphEncoder(nn.Module):
     def __init__(self, num_node_types, bpe_vocab_size, type_dim=64, struct_dim=28, subword_dim=128, hidden_dim=256, num_relations=16, pad_idx=0, global_dim=37,
                  num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                  cls_hidden1=256, cls_hidden2=64, dropout_cls1=0.3, dropout_cls2=0.2,
-                 mask_rate=0.15):
+                 mask_rate=0.15, ablation="full"):
         super().__init__()
+        if ablation not in ABLATION_IDS:
+            raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
         self.pad_idx = pad_idx
         self.mask_rate = mask_rate
+        self.ablation = ablation
+        self.use_subword = ablation != "no-subword"
+        self.use_struct = ablation != "no-struct"
+        self.use_gate = ablation != "no-gate"
+        self.use_virtual = ablation != "no-virtual"
+        self.use_attn_pool = ablation != "mean-pool"
+        self.use_film = ablation != "no-film"
+        # I keep the full 4-layer stack for every config except the floor:
+        # no-mp zeroes it (JK/virtual become vacuous by construction there).
+        eff_layers = 0 if ablation == "no-mp" else num_layers
+        # I fuse scales exactly like the full model except no-jk (last layer
+        # only) and no-mp (single-scale projected features, no message passing).
+        self.jk_last_only = ablation == "no-jk"
+        jk_scales = 1 if (ablation in ("no-mp", "no-jk")) else eff_layers
+        self.jk_dim = hidden_dim * jk_scales
+        # I derive every downstream width from the flags above so full-model
+        # dims (proj 220->256, pool_att 1052->128, film 37->3072, clf 3072)
+        # fall out unchanged when ablation="full".
+        proj_in = type_dim + (struct_dim if self.use_struct else 0) + (subword_dim if self.use_subword else 0)
+        pool_in = self.jk_dim + (struct_dim if self.use_struct else 0)
+        graph_dim = self.jk_dim * (3 if self.use_virtual else 2)
         self.type_emb = nn.Embedding(num_node_types, type_dim)
-        self.subword_emb = nn.Embedding(bpe_vocab_size, subword_dim, padding_idx=pad_idx)
-        self.subword_conv = nn.Conv1d(subword_dim, subword_dim, 3, padding=1)
-        self.subword_attn = nn.Linear(subword_dim, 1)
-        self.proj = nn.Sequential(nn.Linear(type_dim + struct_dim + subword_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
-        self.layers = nn.ModuleList([GatedGNNLayer(hidden_dim, num_relations, dropout_gnn) for _ in range(num_layers)])
+        if self.use_subword:
+            self.subword_emb = nn.Embedding(bpe_vocab_size, subword_dim, padding_idx=pad_idx)
+            self.subword_conv = nn.Conv1d(subword_dim, subword_dim, 3, padding=1)
+            self.subword_attn = nn.Linear(subword_dim, 1)
+        self.proj = nn.Sequential(nn.Linear(proj_in, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
+        self.layers = nn.ModuleList([GatedGNNLayer(hidden_dim, num_relations, dropout_gnn) for _ in range(eff_layers)])
         # NOTE: graph_emb dim is hidden_dim * num_layers * 3
         # (JK-concat add-pool + max-pool + virtual). At notebook defaults
         # (256 x 4) this is exactly 3072, matching the notebooks bit-for-bit.
-        self.pool_att = nn.Sequential(nn.Linear(hidden_dim * num_layers + struct_dim, pool_hidden), nn.GELU(), nn.Linear(pool_hidden, 1))
-        self.film_gate = nn.Sequential(nn.Linear(global_dim, film_hidden), nn.LayerNorm(film_hidden), nn.GELU(), nn.Linear(film_hidden, hidden_dim * num_layers * 3))
-        self.classifier = nn.Sequential(nn.Linear(hidden_dim * num_layers * 3, cls_hidden1), nn.LayerNorm(cls_hidden1), nn.GELU(), nn.Dropout(dropout_cls1), nn.Linear(cls_hidden1, cls_hidden2), nn.GELU(), nn.Dropout(dropout_cls2), nn.Linear(cls_hidden2, 1))
+        if self.use_attn_pool:
+            self.pool_att = nn.Sequential(nn.Linear(pool_in, pool_hidden), nn.GELU(), nn.Linear(pool_hidden, 1))
+        else:
+            # I delete the attention module outright so param counts stay
+            # honest for the mean-pooling comparison.
+            self.pool_att = None
+        if self.use_film:
+            self.film_gate = nn.Sequential(nn.Linear(global_dim, film_hidden), nn.LayerNorm(film_hidden), nn.GELU(), nn.Linear(film_hidden, graph_dim))
+        else:
+            self.film_gate = None
+        self.classifier = nn.Sequential(nn.Linear(graph_dim, cls_hidden1), nn.LayerNorm(cls_hidden1), nn.GELU(), nn.Dropout(dropout_cls1), nn.Linear(cls_hidden1, cls_hidden2), nn.GELU(), nn.Dropout(dropout_cls2), nn.Linear(cls_hidden2, 1))
 
     def forward(self, data, enable_token_masking=False):
         edge_index, edge_type = data.edge_index, data.edge_attr
@@ -74,29 +144,60 @@ class AdvancedASTGraphEncoder(nn.Module):
                 subword_mask = torch.rand(x_subwords.size(0), device=x_subwords.device) < self.mask_rate
                 x_subwords[subword_mask] = self.pad_idx
 
-        sub_conv = F.gelu(self.subword_conv(self.subword_emb(x_subwords).permute(0, 2, 1))).permute(0, 2, 1)
-        attn_logits = self.subword_attn(sub_conv).masked_fill(~(x_subwords != self.pad_idx).unsqueeze(-1), -1e9)
-        agg_sub_emb = (sub_conv * torch.nan_to_num(torch.softmax(attn_logits, dim=1), nan=0.0)).sum(dim=1)
+        proj_parts = [self.type_emb(data.x_type)]
+        if self.use_struct:
+            proj_parts.append(data.x_struct)
+        if self.use_subword:
+            sub_conv = F.gelu(self.subword_conv(self.subword_emb(x_subwords).permute(0, 2, 1))).permute(0, 2, 1)
+            attn_logits = self.subword_attn(sub_conv).masked_fill(~(x_subwords != self.pad_idx).unsqueeze(-1), -1e9)
+            agg_sub_emb = (sub_conv * torch.nan_to_num(torch.softmax(attn_logits, dim=1), nan=0.0)).sum(dim=1)
+            proj_parts.append(agg_sub_emb)
 
-        x = self.proj(torch.cat([self.type_emb(data.x_type), data.x_struct, agg_sub_emb], dim=-1))
-        h_all = []
-        for layer in self.layers:
-            x = layer(x, edge_index, edge_type)
-            h_all.append(x)
-        h_jk = torch.cat(h_all, dim=-1)
+        x = self.proj(torch.cat(proj_parts, dim=-1))
+        if self.ablation == "no-mp":
+            h_jk = x
+        else:
+            h_all = []
+            for layer in self.layers:
+                if self.use_gate:
+                    x = layer(x, edge_index, edge_type)
+                else:
+                    # I ablate only the gate here: same conv+norm+dropout as
+                    # GatedGNNLayer, plain residual instead of g*h+(1-g)*x.
+                    h = layer.dropout(F.gelu(layer.norm(layer.conv(x, edge_index, edge_type))))
+                    x = x + h
+                h_all.append(x)
+            h_jk = h_all[-1] if self.jk_last_only else torch.cat(h_all, dim=-1)
 
-        virtual_indices = torch.cumsum(torch.bincount(data.batch), dim=0) - 1
-        ast_mask = torch.ones(h_jk.size(0), dtype=torch.bool, device=h_jk.device)
-        ast_mask[virtual_indices] = False
+        if self.use_virtual:
+            virtual_indices = torch.cumsum(torch.bincount(data.batch), dim=0) - 1
+            ast_mask = torch.ones(h_jk.size(0), dtype=torch.bool, device=h_jk.device)
+            ast_mask[virtual_indices] = False
+            h_jk_ast, batch_ast = h_jk[ast_mask], data.batch[ast_mask]
+        else:
+            # I built no-virtual graphs without the supernode, so every node
+            # is an AST node and pooling covers the whole batch directly.
+            h_jk_ast, batch_ast = h_jk, data.batch
 
-        h_jk_ast, batch_ast = h_jk[ast_mask], data.batch[ast_mask]
-        att_weights = softmax(self.pool_att(torch.cat([h_jk_ast, data.x_struct[ast_mask]], dim=-1)), batch_ast)
+        if self.use_attn_pool:
+            pool_parts = [h_jk_ast]
+            if self.use_struct:
+                pool_parts.append(data.x_struct[ast_mask] if self.use_virtual else data.x_struct)
+            att_weights = softmax(self.pool_att(torch.cat(pool_parts, dim=-1)), batch_ast)
+            pooled = global_add_pool(h_jk_ast * att_weights, batch_ast)
+        else:
+            pooled = global_mean_pool(h_jk_ast, batch_ast)
 
-        graph_emb = torch.cat([global_add_pool(h_jk_ast * att_weights, batch_ast), global_max_pool(h_jk_ast, batch_ast), h_jk[virtual_indices]], dim=-1)
-        return self.classifier(graph_emb * torch.sigmoid(self.film_gate(data.global_stats))).view(-1)
+        if self.use_virtual:
+            graph_emb = torch.cat([pooled, global_max_pool(h_jk_ast, batch_ast), h_jk[virtual_indices]], dim=-1)
+        else:
+            graph_emb = torch.cat([pooled, global_max_pool(h_jk_ast, batch_ast)], dim=-1)
+        if self.use_film:
+            graph_emb = graph_emb * torch.sigmoid(self.film_gate(data.global_stats))
+        return self.classifier(graph_emb).view(-1)
 
 
-def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams=None):
+def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams=None, ablation="full"):
     return {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -109,33 +210,49 @@ def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means,
         'global_means': g_means,
         'global_stds': g_stds,
         'hyperparams': dict(hyperparams) if hyperparams else dict(HPARAM_DEFAULTS),
+        # I persist the ablation id so eval rebuilds the matching encoder
+        # variant automatically; old checkpoints predate the study and read
+        # back as "full".
+        'ablation': ablation,
     }
 
 
-def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams), filepath)
+def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint preserved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams), filepath)
+def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint saved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams), filepath)
+def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     print(f"[+] Checkpoint safely preserved at: {filepath}")
 
 
-def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None):
+def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
     if language == "python":
-        return save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams)
+        return save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation)
     elif language == "cpp":
-        return save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams)
+        return save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation)
     else:
-        return save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams)
+        return save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation)
+
+
+def ablation_checkpoint_path(language, ablation, adversarial=False):
+    """Namespaced checkpoint file for an ablation run.
+
+    Every ablation id (including full) gets its own file so study runs can
+    never clobber the main {language}_cpg_bundle checkpoints.
+    """
+    if ablation not in ABLATION_IDS:
+        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    tag = "adv" if adversarial else "clean"
+    return f"model_{tag}_abl-{ablation}_{language}.pth"
 
 
 def load_checkpoint(filepath, model, device, optimizer=None):
@@ -160,7 +277,19 @@ def checkpoint_hparams(filepath, device="cpu"):
     return hp
 
 
-def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None):
+def checkpoint_ablation(filepath, device="cpu"):
+    """Read the ablation id stored in a checkpoint (old files predate the study: full)."""
+    try:
+        ckpt = torch.load(filepath, map_location=device, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(filepath, map_location=device)
+    ablation = ckpt.get('ablation', 'full')
+    if ablation not in ABLATION_IDS:
+        raise ValueError(f"Checkpoint {filepath} holds unknown ablation '{ablation}'.")
+    return ablation
+
+
+def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation="full"):
     """Rebuild the encoder for eval: checkpoint hyperparams win, else notebook defaults."""
     from language_configs import BPE_VOCAB_SIZE
     hp = dict(HPARAM_DEFAULTS)
@@ -175,13 +304,14 @@ def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None):
         pool_hidden=hp['pool_hidden'], film_hidden=hp['film_hidden'],
         cls_hidden1=hp['cls_hidden1'], cls_hidden2=hp['cls_hidden2'],
         dropout_cls1=hp['dropout_cls1'], dropout_cls2=hp['dropout_cls2'],
-        mask_rate=hp['mask_rate'],
+        mask_rate=hp['mask_rate'], ablation=ablation,
     ).to(device)
     return model, hp
 
 
 def build_encoder_from_checkpoint(ctx, filepath, device="cpu"):
+    ablation = checkpoint_ablation(filepath, device)
     hp = checkpoint_hparams(filepath, device)
-    model, hp = build_encoder(ctx, hp, device)
+    model, hp = build_encoder(ctx, hp, device, ablation=ablation)
     load_checkpoint(filepath, model, device)
     return model, hp

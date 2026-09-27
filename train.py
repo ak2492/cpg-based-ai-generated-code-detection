@@ -25,9 +25,9 @@ from language_configs import (
     BPE_VOCAB_SIZE,
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
-from model import AdvancedASTGraphEncoder, save_checkpoint_for_language
+from model import ABLATION_IDS, AdvancedASTGraphEncoder, ablation_checkpoint_path, save_checkpoint_for_language
 from attack_utils import current_rss_mb
-from pipeline import load_bundle, require_adv_graphs, seed_everything
+from pipeline import load_bundle, load_bundle_for_ablation, require_adv_graphs, seed_everything
 
 
 TRAIN_TITLE = {
@@ -48,7 +48,11 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        type_dim=64, subword_dim=128, hidden_dim=256,
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
-                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15):
+                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full"):
+    if ablation not in ABLATION_IDS:
+        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    if adversarial and ablation != "full":
+        raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
     model = AdvancedASTGraphEncoder(
         num_node_types=ctx.vocab_size,
         bpe_vocab_size=BPE_VOCAB_SIZE,
@@ -58,7 +62,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         pool_hidden=pool_hidden, film_hidden=film_hidden,
         cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
         dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
-        mask_rate=mask_rate,
+        mask_rate=mask_rate, ablation=ablation,
     ).to(device)
     hyperparams = {
         'type_dim': type_dim, 'subword_dim': subword_dim, 'hidden_dim': hidden_dim,
@@ -138,11 +142,13 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     if best_weights is not None:
         model.load_state_dict(best_weights)
 
-    ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
+    ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
+                 if ablation != "full" else
+                 (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
     save_checkpoint_for_language(language, ckpt_file, model, optimizer, epoch,
                                  best_f1, best_roc, threshold,
                                  ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
-                                 hyperparams)
+                                 hyperparams, ablation)
 
     total_time = time.perf_counter() - t0
     peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
@@ -163,7 +169,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                 type_dim=64, subword_dim=128, hidden_dim=256,
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
-                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42):
+                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full"):
     """Train one model from the saved bundle. Never builds CPGs.
 
     Seeds first so the DataLoader shuffle / dropout / token-masking trajectory
@@ -171,12 +177,17 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
     the same process. Without this, the split processes diverge and test
     accuracy shifts by ~1pt on identical code. I expose `seed` because I want
     5-seed averages (42-46) over identical data and bundles.
+
+    `ablation` selects one of the ten study configs (clean-only, test-set
+    eval). Graph-changing ablations derive their graphs from the standard
+    bundle in-memory (no re-parsing); the checkpoint is namespaced per config
+    so study runs never clobber the main checkpoints.
     """
     seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
-    bundle = load_bundle(language)
+    bundle = load_bundle_for_ablation(language, ablation)
     ctx = bundle["ctx"]
     if adversarial:
         train_graphs = require_adv_graphs(bundle, language)
@@ -194,7 +205,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                               pool_hidden=pool_hidden, film_hidden=film_hidden,
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
-                              mask_rate=mask_rate)
+                              mask_rate=mask_rate, ablation=ablation)
 
 
 def _add_hyper_args(parser):
@@ -232,6 +243,8 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
+    parser.add_argument("--ablation", type=str, default="full", choices=list(ABLATION_IDS),
+                        help="Study config (clean-only, namespaced checkpoint); full = reference model")
     parser = _add_hyper_args(parser)
     args = parser.parse_args()
 
@@ -239,6 +252,7 @@ if __name__ == "__main__":
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size,
                 adversarial=args.adversarial, patience=args.patience, seed=args.seed,
+                ablation=args.ablation,
                 lr=args.lr, weight_decay=args.weight_decay, tmax=args.tmax, eta_min=args.eta_min,
                 accum_steps=args.accum_steps, smooth_pos=args.smooth_pos, smooth_neg=args.smooth_neg,
                 grad_clip=args.grad_clip, threshold=args.threshold,

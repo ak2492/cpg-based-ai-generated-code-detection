@@ -24,6 +24,7 @@ from graph_builder import (
     process_split,
     fit_normalization,
     apply_normalization,
+    CONTINUOUS_IDX,
 )
 from augment import generate_adversarial_augmentations
 
@@ -243,6 +244,115 @@ def require_adv_graphs(bundle, language):
         raise RuntimeError(
             f"Adv graphs missing for '{language}'. Rerun `python main.py --language {language} --adversarial` first.")
     return bundle["train_adv_graphs"]
+
+
+# ---------------------------------------------------------------------------
+# Ablation graph variants: extract once, derive forever.
+#
+# main.py parses each language ONCE (standard bundle). The two graph-changing
+# ablations derive their graphs in-memory from that bundle: no re-parsing,
+# so test-set extraction (balanced cpp / full python-java) is never repeated.
+# Normalization is refit per variant on the derived train_clean graphs and
+# stored on a fresh ctx, so each variant is self-contained and deterministic.
+# ---------------------------------------------------------------------------
+
+def _denormalize_graphs(graphs, ctx):
+    """Exactly invert apply_normalization (float roundtrip ~1 ulp, deterministic)."""
+    out = []
+    for g in graphs:
+        g2 = g.clone()
+        g2.x_struct[:, CONTINUOUS_IDX] = g2.x_struct[:, CONTINUOUS_IDX] * ctx.stds + ctx.means
+        g2.global_stats = g2.global_stats * ctx.g_stds + ctx.g_means
+        out.append(g2)
+    return out
+
+
+def _filter_graph_edges(graphs, keep_types):
+    """Return new graphs keeping only edge types in keep_types (nodes untouched)."""
+    from torch_geometric.data import Data
+    keep = set(keep_types)
+    out = []
+    for g in graphs:
+        mask = torch.tensor([int(t) in keep for t in g.edge_attr.tolist()], dtype=torch.bool)
+        out.append(Data(
+            x_type=g.x_type.clone(), x_struct=g.x_struct.clone(), x_subwords=g.x_subwords.clone(),
+            edge_index=g.edge_index[:, mask].clone(), edge_attr=g.edge_attr[mask].clone(),
+            y=g.y.clone(), num_nodes=int(g.num_nodes),
+            virtual_idx=int(g.virtual_idx), global_stats=g.global_stats.clone(),
+        ))
+    return out
+
+
+def _strip_virtual_node(graphs):
+    """Return new graphs without the supernode (last node) and its type-8 edges."""
+    from torch_geometric.data import Data
+    out = []
+    for g in graphs:
+        n = int(g.num_nodes)
+        v = int(g.virtual_idx)
+        assert v == n - 1, f"Virtual node must be last (got virtual_idx={v}, num_nodes={n})"
+        keep_edge = ((g.edge_index[0] != v) & (g.edge_index[1] != v) & (g.edge_attr != 8))
+        assert bool(keep_edge.any()), "no-virtual variant left a graph with zero edges"
+        out.append(Data(
+            x_type=g.x_type[:-1].clone(), x_struct=g.x_struct[:-1].clone(),
+            x_subwords=g.x_subwords[:-1].clone(),
+            edge_index=g.edge_index[:, keep_edge].clone(), edge_attr=g.edge_attr[keep_edge].clone(),
+            y=g.y.clone(), num_nodes=n - 1,
+            virtual_idx=-1, global_stats=g.global_stats.clone(),
+        ))
+    return out
+
+
+def derive_variant_bundle(bundle, variant):
+    """Derive a graph-variant bundle from a loaded standard bundle.
+
+    Returns a NEW bundle dict (fresh ctx, refit normalization); the input
+    bundle is never mutated. variant="standard" returns the input unchanged.
+    """
+    from model import GRAPH_VARIANTS
+    if variant not in GRAPH_VARIANTS:
+        raise ValueError(f"Unknown graph variant '{variant}'. Choose from {list(GRAPH_VARIANTS)}.")
+    if variant == "standard":
+        return bundle
+    ctx = bundle["ctx"]
+    train = _denormalize_graphs(bundle["train_clean_graphs"], ctx)
+    val = _denormalize_graphs(bundle["val_graphs"], ctx)
+    test = _denormalize_graphs(bundle["test_graphs"], ctx)
+    if variant == "syntax-only":
+        from model import SYNTAX_ONLY_EDGE_TYPES
+        train, val, test = (_filter_graph_edges(s, SYNTAX_ONLY_EDGE_TYPES) for s in (train, val, test))
+    elif variant == "no-virtual":
+        train, val, test = (_strip_virtual_node(s) for s in (train, val, test))
+    new_ctx = GraphContext(ctx.language, ctx.parser, ctx.type_to_id, ctx.vocab_size,
+                           ctx.bpe_tokenizer, ctx.pad_id, ctx.token_to_rank, ctx.max_rank)
+    fit_normalization(train, new_ctx)
+    apply_normalization(train, new_ctx)
+    apply_normalization(val, new_ctx)
+    apply_normalization(test, new_ctx)
+    print(f"[✓] Graph variant '{variant}': derived train={len(train)} val={len(val)} "
+          f"test={len(test)} from the cached standard bundle (no re-parsing).")
+    return {
+        "ctx": new_ctx,
+        "parser": bundle["parser"],
+        "trial_samples": bundle.get("trial_samples"),
+        "limit": bundle.get("limit"),
+        "has_adv": False,
+        "train_clean_graphs": train,
+        "train_adv_graphs": None,
+        "val_graphs": val,
+        "test_graphs": test,
+    }
+
+
+def load_bundle_for_ablation(language, ablation, path=None):
+    """Load the standard bundle and derive the graphs an ablation id needs.
+
+    Parsing/extraction happens exactly once per language (via main.py); all
+    ten configs reuse it. The returned bundle is ready to train/evaluate.
+    """
+    from model import graph_variant_for_ablation
+    bundle = load_bundle(language, path=path)
+    return derive_variant_bundle(bundle, graph_variant_for_ablation(ablation))
 
 
 def load_test_raw_rows(language):
