@@ -25,9 +25,9 @@ from language_configs import (
     BPE_VOCAB_SIZE,
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
-from model import ABLATION_IDS, AdvancedASTGraphEncoder, ablation_checkpoint_path, save_checkpoint_for_language
+from model import AdvancedASTGraphEncoder, ablation_checkpoint_path, canonical_ablation, save_checkpoint_for_language
 from attack_utils import current_rss_mb
-from pipeline import load_bundle, load_bundle_for_ablation, require_adv_graphs, seed_everything
+from pipeline import load_bundle_for_ablation, require_adv_graphs, seed_everything
 
 
 TRAIN_TITLE = {
@@ -49,8 +49,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
                        dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full"):
-    if ablation not in ABLATION_IDS:
-        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
     model = AdvancedASTGraphEncoder(
@@ -243,10 +242,17 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
-    parser.add_argument("--ablation", type=str, default="full", choices=list(ABLATION_IDS),
-                        help="Study config (clean-only, namespaced checkpoint); full = reference model")
+    parser.add_argument("--ablation", type=str, default="full",
+                        help="Study config: a single id or '+'-joined combo "
+                             "(full no-mp no-subword no-struct syntax-only no-gate no-jk "
+                             "no-virtual mean-pool no-film); clean-only, namespaced checkpoint")
     parser = _add_hyper_args(parser)
     args = parser.parse_args()
+
+    try:
+        args.ablation = canonical_ablation(args.ablation)
+    except ValueError as e:
+        parser.error(str(e))
 
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]

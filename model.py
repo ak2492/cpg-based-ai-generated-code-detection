@@ -72,11 +72,55 @@ GRAPH_VARIANT_FOR_ABLATION = {
 GRAPH_VARIANTS = ("standard", "syntax-only", "no-virtual")
 
 
+def parse_ablation(ablation):
+    """Split a (possibly combined) ablation id into its single-factor parts.
+
+    Combos join singles with '+', e.g. 'no-subword+no-struct'. Returns the
+    parts in canonical ABLATION_IDS order so checkpoint filenames are stable
+    no matter what order the user typed. Raises on unknown, duplicate, or
+    degenerate combos.
+    """
+    parts = [p.strip() for p in str(ablation).split("+")]
+    if any(not p for p in parts):
+        raise ValueError(f"Malformed ablation id '{ablation}'. Use '+'-joined ids from {list(ABLATION_IDS)}.")
+    for p in parts:
+        if p not in ABLATION_IDS:
+            raise ValueError(f"Unknown ablation '{p}' in '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    if len(set(parts)) != len(parts):
+        raise ValueError(f"Duplicate component in ablation '{ablation}'.")
+    if "full" in parts and len(parts) > 1:
+        raise ValueError(f"'full' cannot be combined: '{ablation}'.")
+    if "no-mp" in parts and len(parts) > 1:
+        # I reject these because the floor already zeroes the layer stack:
+        # no-mp+no-jk (or +no-gate/...) is just no-mp wearing a disguise,
+        # and running it would spend a full training on a duplicate.
+        raise ValueError(f"'no-mp' cannot be combined: '{ablation}' is identical to 'no-mp'.")
+    return tuple(p for p in ABLATION_IDS if p in parts)
+
+
+def canonical_ablation(ablation):
+    """Canonical (order-stable) string for an ablation id or combo."""
+    return "+".join(parse_ablation(ablation))
+
+
 def graph_variant_for_ablation(ablation):
     """Return the graph variant an ablation id trains/evaluates on."""
-    if ablation not in ABLATION_IDS:
-        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
-    return GRAPH_VARIANT_FOR_ABLATION.get(ablation, "standard")
+    variants = graph_variants_for_ablation(ablation)
+    if len(variants) > 1:
+        raise ValueError(
+            f"Ablation '{ablation}' needs graph variants {list(variants)}; "
+            f"use graph_variants_for_ablation() instead.")
+    return variants[0] if variants else "standard"
+
+
+def graph_variants_for_ablation(ablation):
+    """Return the graph variants a (possibly combined) ablation needs, in
+    derivation order (edge filter before supernode strip). Empty tuple means
+    standard graphs."""
+    parts = parse_ablation(ablation)
+    ordered = [v for v in GRAPH_VARIANTS[1:] for p in parts
+               if GRAPH_VARIANT_FOR_ABLATION.get(p) == v]
+    return tuple(dict.fromkeys(ordered))
 
 
 class AdvancedASTGraphEncoder(nn.Module):
@@ -85,24 +129,24 @@ class AdvancedASTGraphEncoder(nn.Module):
                  cls_hidden1=256, cls_hidden2=64, dropout_cls1=0.3, dropout_cls2=0.2,
                  mask_rate=0.15, ablation="full"):
         super().__init__()
-        if ablation not in ABLATION_IDS:
-            raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+        parts = set(parse_ablation(ablation))
+        self.ablation = canonical_ablation(ablation)
+        self.ablation_parts = frozenset(parts)
         self.pad_idx = pad_idx
         self.mask_rate = mask_rate
-        self.ablation = ablation
-        self.use_subword = ablation != "no-subword"
-        self.use_struct = ablation != "no-struct"
-        self.use_gate = ablation != "no-gate"
-        self.use_virtual = ablation != "no-virtual"
-        self.use_attn_pool = ablation != "mean-pool"
-        self.use_film = ablation != "no-film"
+        self.use_subword = "no-subword" not in parts
+        self.use_struct = "no-struct" not in parts
+        self.use_gate = "no-gate" not in parts
+        self.use_virtual = "no-virtual" not in parts
+        self.use_attn_pool = "mean-pool" not in parts
+        self.use_film = "no-film" not in parts
         # I keep the full 4-layer stack for every config except the floor:
         # no-mp zeroes it (JK/virtual become vacuous by construction there).
-        eff_layers = 0 if ablation == "no-mp" else num_layers
+        eff_layers = 0 if "no-mp" in parts else num_layers
         # I fuse scales exactly like the full model except no-jk (last layer
         # only) and no-mp (single-scale projected features, no message passing).
-        self.jk_last_only = ablation == "no-jk"
-        jk_scales = 1 if (ablation in ("no-mp", "no-jk")) else eff_layers
+        self.jk_last_only = "no-jk" in parts
+        jk_scales = 1 if ("no-mp" in parts or "no-jk" in parts) else eff_layers
         self.jk_dim = hidden_dim * jk_scales
         # I derive every downstream width from the flags above so full-model
         # dims (proj 220->256, pool_att 1052->128, film 37->3072, clf 3072)
@@ -117,9 +161,10 @@ class AdvancedASTGraphEncoder(nn.Module):
             self.subword_attn = nn.Linear(subword_dim, 1)
         self.proj = nn.Sequential(nn.Linear(proj_in, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
         self.layers = nn.ModuleList([GatedGNNLayer(hidden_dim, num_relations, dropout_gnn) for _ in range(eff_layers)])
-        # NOTE: graph_emb dim is hidden_dim * num_layers * 3
+        # NOTE: full-model graph_emb dim is hidden_dim * num_layers * 3
         # (JK-concat add-pool + max-pool + virtual). At notebook defaults
         # (256 x 4) this is exactly 3072, matching the notebooks bit-for-bit.
+        # Ablations derive it as jk_dim * (3 with virtual | 2 without).
         if self.use_attn_pool:
             self.pool_att = nn.Sequential(nn.Linear(pool_in, pool_hidden), nn.GELU(), nn.Linear(pool_hidden, 1))
         else:
@@ -154,7 +199,7 @@ class AdvancedASTGraphEncoder(nn.Module):
             proj_parts.append(agg_sub_emb)
 
         x = self.proj(torch.cat(proj_parts, dim=-1))
-        if self.ablation == "no-mp":
+        if "no-mp" in self.ablation_parts:
             h_jk = x
         else:
             h_all = []
@@ -164,6 +209,9 @@ class AdvancedASTGraphEncoder(nn.Module):
                 else:
                     # I ablate only the gate here: same conv+norm+dropout as
                     # GatedGNNLayer, plain residual instead of g*h+(1-g)*x.
+                    # The unused gate Linear stays in the module on purpose:
+                    # identical capacity means the comparison isolates the
+                    # computation (gated blend vs addition), not model size.
                     h = layer.dropout(F.gelu(layer.norm(layer.conv(x, edge_index, edge_type))))
                     x = x + h
                 h_all.append(x)
@@ -246,13 +294,12 @@ def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, va
 def ablation_checkpoint_path(language, ablation, adversarial=False):
     """Namespaced checkpoint file for an ablation run.
 
-    Every ablation id (including full) gets its own file so study runs can
-    never clobber the main {language}_cpg_bundle checkpoints.
+    Every non-full config (single or combined, canonically ordered) gets its
+    own file so study runs can never clobber the main checkpoints.
     """
-    if ablation not in ABLATION_IDS:
-        raise ValueError(f"Unknown ablation '{ablation}'. Choose from {list(ABLATION_IDS)}.")
+    canonical = canonical_ablation(ablation)
     tag = "adv" if adversarial else "clean"
-    return f"model_{tag}_abl-{ablation}_{language}.pth"
+    return f"model_{tag}_abl-{canonical}_{language}.pth"
 
 
 def load_checkpoint(filepath, model, device, optimizer=None):
@@ -284,9 +331,7 @@ def checkpoint_ablation(filepath, device="cpu"):
     except TypeError:
         ckpt = torch.load(filepath, map_location=device)
     ablation = ckpt.get('ablation', 'full')
-    if ablation not in ABLATION_IDS:
-        raise ValueError(f"Checkpoint {filepath} holds unknown ablation '{ablation}'.")
-    return ablation
+    return canonical_ablation(ablation)
 
 
 def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation="full"):

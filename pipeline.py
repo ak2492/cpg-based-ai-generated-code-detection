@@ -270,10 +270,11 @@ def _denormalize_graphs(graphs, ctx):
 def _filter_graph_edges(graphs, keep_types):
     """Return new graphs keeping only edge types in keep_types (nodes untouched)."""
     from torch_geometric.data import Data
-    keep = set(keep_types)
+    keep_types = sorted(keep_types)
     out = []
     for g in graphs:
-        mask = torch.tensor([int(t) in keep for t in g.edge_attr.tolist()], dtype=torch.bool)
+        mask = torch.isin(g.edge_attr,
+                          torch.tensor(keep_types, dtype=g.edge_attr.dtype))
         out.append(Data(
             x_type=g.x_type.clone(), x_struct=g.x_struct.clone(), x_subwords=g.x_subwords.clone(),
             edge_index=g.edge_index[:, mask].clone(), edge_attr=g.edge_attr[mask].clone(),
@@ -344,15 +345,25 @@ def derive_variant_bundle(bundle, variant):
     }
 
 
+def derive_variant_bundles(bundle, variants):
+    """Apply several graph variants in order (edge filter before supernode
+    strip). Each step denormalizes with the current ctx, filters, and refits,
+    so chained variants stay exact. Empty sequence returns the input."""
+    for variant in variants:
+        bundle = derive_variant_bundle(bundle, variant)
+    return bundle
+
+
 def load_bundle_for_ablation(language, ablation, path=None):
     """Load the standard bundle and derive the graphs an ablation id needs.
 
     Parsing/extraction happens exactly once per language (via main.py); all
-    ten configs reuse it. The returned bundle is ready to train/evaluate.
+    configs reuse it. The returned bundle is ready to train/evaluate.
     """
-    from model import graph_variant_for_ablation
+    from model import canonical_ablation, graph_variants_for_ablation
+    ablation = canonical_ablation(ablation)
     bundle = load_bundle(language, path=path)
-    return derive_variant_bundle(bundle, graph_variant_for_ablation(ablation))
+    return derive_variant_bundles(bundle, graph_variants_for_ablation(ablation))
 
 
 def load_test_raw_rows(language):
