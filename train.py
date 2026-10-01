@@ -12,7 +12,10 @@ value, e.g. grid search:
 """
 import argparse
 import copy
+import os
+import shutil
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -40,6 +43,17 @@ TRAIN_TITLE = {
 }
 
 
+def _archive_path(ckpt_file, seed):
+    """Per-run archive next to the canonical file; never overwrites.
+
+    Name embeds seed + timestamp so repeat runs accumulate instead of
+    clobbering, and the existing `*_seed*.pth` upload glob still matches.
+    """
+    base, ext = os.path.splitext(ckpt_file)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{base}_seed{seed}_{stamp}{ext or '.pth'}"
+
+
 def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=40,
                        adversarial=False, language="python",
                        lr=5e-5, weight_decay=1e-3, tmax=40, eta_min=1e-6,
@@ -48,7 +62,8 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        type_dim=64, subword_dim=128, hidden_dim=256,
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
-                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full"):
+                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
+                       seed=42):
     ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
@@ -82,7 +97,11 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     val_loader = DataLoader(val_graphs, batch_size=batch_size, shuffle=False)
 
     best_f1, best_roc = 0.0, 0.0
+    best_epoch = 0
     best_weights = None
+    ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
+                 if ablation != "full" else
+                 (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -131,18 +150,32 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         if cur_f1 > best_f1:
             best_f1 = cur_f1
             best_roc = cur_roc
+            best_epoch = epoch
             best_weights = copy.deepcopy(model.state_dict())
+            # Crash-safe: persist best-so-far immediately (atomic write).
+            # A kill at epoch N keeps the best through N-1, not nothing.
+            save_checkpoint_for_language(language, ckpt_file, model, optimizer, best_epoch,
+                                         best_f1, best_roc, threshold,
+                                         ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
+                                         hyperparams, ablation)
 
     if best_weights is not None:
         model.load_state_dict(best_weights)
-
-    ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
-                 if ablation != "full" else
-                 (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
-    save_checkpoint_for_language(language, ckpt_file, model, optimizer, epoch,
-                                 best_f1, best_roc, threshold,
-                                 ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
-                                 hyperparams, ablation)
+        save_checkpoint_for_language(language, ckpt_file, model, optimizer, best_epoch,
+                                     best_f1, best_roc, threshold,
+                                     ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
+                                     hyperparams, ablation)
+    else:
+        save_checkpoint_for_language(language, ckpt_file, model, optimizer, epochs - 1,
+                                     best_f1, best_roc, threshold,
+                                     ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
+                                     hyperparams, ablation)
+    try:
+        archived = _archive_path(ckpt_file, seed)
+        shutil.copyfile(ckpt_file, archived)
+        print(f"[+] Per-run archive -> {archived}")
+    except OSError as e:
+        print(f"[!] Archive copy skipped ({e})")
 
     total_time = time.perf_counter() - t0
     peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
@@ -199,7 +232,7 @@ def train_model(language="python", epochs=40, batch_size=None, adversarial=False
                               pool_hidden=pool_hidden, film_hidden=film_hidden,
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
-                              mask_rate=mask_rate, ablation=ablation)
+                              mask_rate=mask_rate, ablation=ablation, seed=seed)
 
 
 def _add_hyper_args(parser):

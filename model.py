@@ -1,10 +1,3 @@
-"""GNN model — identical across all three notebooks, combined once.
-
-GatedGNNLayer and AdvancedASTGraphEncoder bodies are byte-identical
-(modulo a single comment line in the java notebook, preserved below).
-Save helpers preserve each notebook's exact filename convention and
-print wording; outputs (checkpoint dict keys) are identical.
-"""
 import os
 import torch
 import torch.nn as nn
@@ -27,10 +20,6 @@ class GatedGNNLayer(nn.Module):
         return g * h + (1.0 - g) * x
 
 
-# Notebook-exact grid-searchable defaults. The constructor literals below mirror
-# these values; keep both in sync. struct_dim (28-d features) and
-# num_relations (16 edge types), and global_dim (37-d macro stats) stay locked —
-# they are dictated by the graph data, and any other value fails forward.
 HPARAM_DEFAULTS = {
     'type_dim': 64, 'subword_dim': 128, 'hidden_dim': 256,
     'num_layers': 4, 'dropout_gnn': 0.15,
@@ -265,20 +254,32 @@ def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means,
     }
 
 
+def _atomic_torch_save(payload, filepath):
+    """Write payload atomically: save to sibling .tmp then os.replace.
+
+    A kill mid-write leaves the previous canonical file intact instead of
+    a truncated .pth. Tmp lives in the same directory so the rename is
+    atomic on both POSIX and Windows.
+    """
+    tmp_path = f"{filepath}.tmp"
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, filepath)
+
+
 def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
+    _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint preserved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
 def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
+    _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint saved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
 def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
-    torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
+    _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     print(f"[+] Checkpoint safely preserved at: {filepath}")
 
 

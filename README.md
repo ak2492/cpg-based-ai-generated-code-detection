@@ -122,6 +122,12 @@ Checkpoints (notebook-native, no `.npy` graph cache):
 Each `.pth` stores `epoch, model_state_dict, optimizer_state_dict, val_f1,
 val_roc, optimal_threshold, normalization_means/stds, global_means/stds`.
 
+Checkpointing: best val-F1 is written to the canonical file immediately on
+improvement (atomic tmp+rename, crash-safe), `epoch` records the best epoch,
+and each run leaves a timestamped copy `*_seed{seed}_{YYYYMMDD_HHMMSS}.pth`
+next to it so repeat runs never clobber prior results. `*.pth` stays
+gitignored; eval/attack/external always load the canonical file.
+
 ## Layout
 
 - `data_loader.py` — `balanced_subset` + magecode loading (shared, identical)
