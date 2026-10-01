@@ -40,9 +40,9 @@ TRAIN_TITLE = {
 }
 
 
-def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=45, patience=10,
+def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=40,
                        adversarial=False, language="python",
-                       lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
+                       lr=5e-5, weight_decay=1e-3, tmax=40, eta_min=1e-6,
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                        grad_clip=1.0, threshold=0.50,
                        type_dim=64, subword_dim=128, hidden_dim=256,
@@ -83,7 +83,6 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
 
     best_f1, best_roc = 0.0, 0.0
     best_weights = None
-    epochs_no_improve = 0
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -133,10 +132,6 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
             best_f1 = cur_f1
             best_roc = cur_roc
             best_weights = copy.deepcopy(model.state_dict())
-            epochs_no_improve = 0
-        elif (epochs_no_improve := epochs_no_improve + 1) >= patience:
-            print(f"-> Early stopping cleanly triggered at epoch {epoch+1}.")
-            break
 
     if best_weights is not None:
         model.load_state_dict(best_weights)
@@ -161,8 +156,8 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     return model, best_f1, best_roc
 
 
-def train_model(language="python", epochs=45, batch_size=None, adversarial=False, patience=10,
-                lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
+def train_model(language="python", epochs=40, batch_size=None, adversarial=False,
+                lr=5e-5, weight_decay=1e-3, tmax=40, eta_min=1e-6,
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
                 type_dim=64, subword_dim=128, hidden_dim=256,
@@ -194,7 +189,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
         train_graphs = bundle["train_clean_graphs"]
     val_graphs = bundle["val_graphs"]
     return train_single_model(train_graphs, val_graphs, ctx, device, batch_size,
-                              epochs=epochs, patience=patience,
+                              epochs=epochs,
                               adversarial=adversarial, language=language,
                               lr=lr, weight_decay=weight_decay, tmax=tmax, eta_min=eta_min,
                               accum_steps=accum_steps, smooth_pos=smooth_pos, smooth_neg=smooth_neg,
@@ -208,10 +203,10 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
 
 
 def _add_hyper_args(parser):
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--accum_steps", type=int, default=2)
-    parser.add_argument("--tmax", type=int, default=45)
+    parser.add_argument("--tmax", type=int, default=40)
     parser.add_argument("--eta_min", type=float, default=1e-6)
     parser.add_argument("--smooth_pos", type=float, default=0.975)
     parser.add_argument("--smooth_neg", type=float, default=0.025)
@@ -235,11 +230,10 @@ def _add_hyper_args(parser):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true",
                         help="Train the adversarially augmented variant (token masking on)")
-    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
     parser.add_argument("--ablation", type=str, default="full",
@@ -257,7 +251,7 @@ if __name__ == "__main__":
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size,
-                adversarial=args.adversarial, patience=args.patience, seed=args.seed,
+                adversarial=args.adversarial, seed=args.seed,
                 ablation=args.ablation,
                 lr=args.lr, weight_decay=args.weight_decay, tmax=args.tmax, eta_min=args.eta_min,
                 accum_steps=args.accum_steps, smooth_pos=args.smooth_pos, smooth_neg=args.smooth_neg,

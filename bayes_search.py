@@ -88,7 +88,6 @@ def build_space(trial, language, preset):
     kw["cls_hidden2"] = trial.suggest_categorical("cls_hidden2", [32, 64, 128])
     kw["dropout_cls1"] = trial.suggest_float("dropout_cls1", 0.1, 0.5)
     kw["dropout_cls2"] = trial.suggest_float("dropout_cls2", 0.0, 0.4)
-    kw["patience"] = trial.suggest_categorical("patience", [5, 10, 15])
     kw["accum_steps"] = trial.suggest_categorical("accum_steps", [1, 2, 4])
     kw["eta_min"] = trial.suggest_float("eta_min", 1e-7, 1e-5, log=True)
     kw["smooth_pos"] = trial.suggest_categorical("smooth_pos", [0.95, 0.975, 0.99])
@@ -110,7 +109,7 @@ def space_snapshot(language, preset):
             "pool_hidden": [64, 128, 256],
             "film_hidden": [64, 128, 256], "cls_hidden1": [128, 256, 512],
             "cls_hidden2": [32, 64, 128], "dropout_cls1": "[0.1, 0.5]",
-            "dropout_cls2": "[0.0, 0.4]", "patience": [5, 10, 15],
+            "dropout_cls2": "[0.0, 0.4]",
             "accum_steps": [1, 2, 4], "eta_min": "[1e-7, 1e-5] log",
             "smooth_pos": [0.95, 0.975, 0.99], "grad_clip": [0.5, 1.0, 2.0],
             "mask_rate": "[0.05, 0.3]",
@@ -190,7 +189,7 @@ def winner_command(args, params):
     parts = [f"python train.py --language {args.language}"]
     if args.adversarial:
         parts.append("--adversarial")
-    if args.epochs != 45:
+    if args.epochs != 40:
         parts.append(f"--epochs {args.epochs}")
     # I emit --seed and the derived --smooth_neg here because refitting
     # without them silently falls back to defaults and will not reproduce
@@ -215,7 +214,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=None,
                     help="Optuna wall-clock budget in seconds (None = trial count only)")
     ap.add_argument("--epochs", type=int, default=30,
-                    help="Epoch cap per trial (refit winner with full 45 after)")
+                    help="Epoch cap per trial (refit winner with full 40 after)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--study", default=None)
     ap.add_argument("--csv", default=None)

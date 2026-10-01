@@ -75,7 +75,7 @@ def _scenario_name(suite):
             "hmcorp": "Ext HMCorp", "gptsniffer": "Ext GPTSniffer"}.get(suite, suite)
 
 
-def run_language(language, seeds, adversarial=False, epochs=45, batch_size=None,
+def run_language(language, seeds, adversarial=False, epochs=40, batch_size=None,
                  threshold=0.50, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
                  rebuild_cache=False):
@@ -228,7 +228,7 @@ if __name__ == "__main__":
                         help="Seed list, e.g. '42-46' or '7,123,999' (any ints allowed)")
     parser.add_argument("--adversarial", action="store_true",
                         help="Run the adversarial variant instead of clean (default: clean)")
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--threshold", type=float, default=0.50)
     parser.add_argument("--base_seed", type=int, default=42,

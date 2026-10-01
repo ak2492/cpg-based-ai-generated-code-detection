@@ -51,12 +51,12 @@ python main.py --language python --adversarial
 # Step 2 — train exactly ONE model from the bundle (Cell 3 clean / Cell 4 adv)
 python train.py --language python                # Model 1 clean
 python train.py --language python --adversarial  # Model 2 adv (needs adv bundle)
-python train.py --language cpp --adversarial --epochs 45
+python train.py --language cpp --adversarial --epochs 40
 python train.py --language java --batch_size 32
 
 # Grid search: every output-affecting hyperparameter is a flag (defaults = notebook values)
 python train.py --language java --hidden_dim 128 --num_layers 2 --lr 1e-4 --epochs 60
-python train.py --language python --dropout_gnn 0.2 --mask_rate 0.2 --patience 15
+python train.py --language python --dropout_gnn 0.2 --mask_rate 0.2
 
 # Step 3 — test exactly ONE model (clean default, adv with flag)
 python evaluate.py --language python
@@ -99,8 +99,8 @@ Hyperparameter flags (`train.py`; omit any flag for the notebook default):
   `--pool_hidden` 128, `--film_hidden` 128, `--cls_hidden1` 256,
   `--cls_hidden2` 64, `--dropout_cls1` 0.3, `--dropout_cls2` 0.2,
   `--mask_rate` 0.15
-- Training: `--lr` 5e-4, `--weight_decay` 1e-3, `--epochs` 45,
-  `--patience` 10, `--accum_steps` 2, `--tmax` 45, `--eta_min` 1e-6,
+- Training: `--lr` 5e-5, `--weight_decay` 1e-3, `--epochs` 40,
+  `--accum_steps` 2, `--tmax` 40, `--eta_min` 1e-6,
   `--smooth_pos` 0.975, `--smooth_neg` 0.025, `--grad_clip` 1.0,
   `--threshold` 0.50, `--batch_size` per-language default
 - Locked (no flag; changing them breaks graph/checkpoint compat):
