@@ -119,8 +119,10 @@ Checkpoints (notebook-native, no `.npy` graph cache):
 - `model_cpp_clean_baseline_checkpoint.pth` / `model_cpp_adv_augmented_checkpoint.pth`
 - `model_clean_baseline_checkpoint.pth` / `model_adv_augmented_checkpoint.pth` (java, no prefix — as in notebook)
 
-Each `.pth` stores `epoch, model_state_dict, optimizer_state_dict, val_f1,
-val_roc, optimal_threshold, normalization_means/stds, global_means/stds`.
+Each `.pth` stores `epoch, model_state_dict, val_f1,
+val_roc, optimal_threshold, normalization_means/stds, global_means/stds`
+(hybrid-style, weights + metadata only — no `optimizer_state_dict`; old
+files containing it still load).
 
 Checkpointing: best val-F1 is written to the canonical file immediately on
 improvement (atomic tmp+rename, crash-safe), `epoch` records the best epoch,

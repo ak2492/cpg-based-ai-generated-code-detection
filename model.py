@@ -234,11 +234,16 @@ class AdvancedASTGraphEncoder(nn.Module):
         return self.classifier(graph_emb).view(-1)
 
 
-def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams=None, ablation="full"):
+def _checkpoint_dict(model, optimizer=None, epoch=0, val_f1=0.0, val_roc=0.0, threshold=0.50, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+    # Hybrid-style: weights + metadata only. Optimizer state is intentionally
+    # omitted (~2/3 of file size) — no eval/attack path ever consumed it, and
+    # exact-resume would additionally need scheduler + RNG states anyway.
+    # `optimizer` is kept as an accepted (ignored) arg so existing
+    # train.py call sites pass unchanged; old files containing the key
+    # still load via load_checkpoint's tolerant guard below.
     return {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
         'val_f1': val_f1,
         'val_roc': val_roc,
         'optimal_threshold': threshold,
@@ -266,24 +271,24 @@ def _atomic_torch_save(payload, filepath):
     os.replace(tmp_path, filepath)
 
 
-def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_python_checkpoint(filepath, model, optimizer=None, epoch=0, val_f1=0.0, val_roc=0.0, threshold=0.50, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
     _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint preserved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_cpp_checkpoint(filepath, model, optimizer=None, epoch=0, val_f1=0.0, val_roc=0.0, threshold=0.50, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
     _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint saved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_checkpoint(filepath, model, optimizer=None, epoch=0, val_f1=0.0, val_roc=0.0, threshold=0.50, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
     _atomic_torch_save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     print(f"[+] Checkpoint safely preserved at: {filepath}")
 
 
-def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_checkpoint_for_language(language, filepath, model, optimizer=None, epoch=0, val_f1=0.0, val_roc=0.0, threshold=0.50, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
     if language == "python":
         return save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation)
     elif language == "cpp":
@@ -309,6 +314,8 @@ def load_checkpoint(filepath, model, device, optimizer=None):
     except TypeError:  # torch < 2.6 without the weights_only kwarg
         ckpt = torch.load(filepath, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
+    # Backward compat: pre-drop files contain 'optimizer_state_dict';
+    # new hybrid-style files omit it. Either loads for eval.
     if optimizer is not None and 'optimizer_state_dict' in ckpt:
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     return ckpt
