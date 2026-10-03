@@ -7,14 +7,22 @@ from torch_geometric.utils import softmax
 
 
 class GatedGNNLayer(nn.Module):
-    def __init__(self, hidden_dim, num_relations, dropout=0.15):
+    def __init__(self, hidden_dim, num_relations, dropout=0.15, num_bases=4, edge_dropout=0.1):
         super().__init__()
-        self.conv = RGCNConv(hidden_dim, hidden_dim, num_relations, num_bases=None)
+        self.conv = RGCNConv(hidden_dim, hidden_dim, num_relations, num_bases=num_bases)
         self.norm = nn.LayerNorm(hidden_dim)
         self.gate = nn.Linear(hidden_dim * 2, hidden_dim)
         self.dropout = nn.Dropout(dropout)
+        self.edge_dropout = edge_dropout
+
+    def _drop_edges(self, edge_index, edge_type):
+        if self.training and self.edge_dropout > 0:
+            mask = torch.rand(edge_index.size(1), device=edge_index.device) >= self.edge_dropout
+            return edge_index[:, mask], edge_type[mask]
+        return edge_index, edge_type
 
     def forward(self, x, edge_index, edge_type):
+        edge_index, edge_type = self._drop_edges(edge_index, edge_type)
         h = self.dropout(F.gelu(self.norm(self.conv(x, edge_index, edge_type))))
         g = torch.sigmoid(self.gate(torch.cat([x, h], dim=-1)))
         return g * h + (1.0 - g) * x
@@ -26,7 +34,7 @@ HPARAM_DEFAULTS = {
     'pool_hidden': 128, 'film_hidden': 128,
     'cls_hidden1': 256, 'cls_hidden2': 64,
     'dropout_cls1': 0.3, 'dropout_cls2': 0.2,
-    'mask_rate': 0.15,
+    'mask_rate': 0.15, 'num_bases': 4, 'edge_dropout': 0.1,
 }
 
 
@@ -116,7 +124,7 @@ class AdvancedASTGraphEncoder(nn.Module):
     def __init__(self, num_node_types, bpe_vocab_size, type_dim=64, struct_dim=28, subword_dim=128, hidden_dim=256, num_relations=16, pad_idx=0, global_dim=37,
                  num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                  cls_hidden1=256, cls_hidden2=64, dropout_cls1=0.3, dropout_cls2=0.2,
-                 mask_rate=0.15, ablation="full"):
+                 mask_rate=0.15, ablation="full", num_bases=4, edge_dropout=0.1):
         super().__init__()
         parts = set(parse_ablation(ablation))
         self.ablation = canonical_ablation(ablation)
@@ -149,7 +157,7 @@ class AdvancedASTGraphEncoder(nn.Module):
             self.subword_conv = nn.Conv1d(subword_dim, subword_dim, 3, padding=1)
             self.subword_attn = nn.Linear(subword_dim, 1)
         self.proj = nn.Sequential(nn.Linear(proj_in, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU())
-        self.layers = nn.ModuleList([GatedGNNLayer(hidden_dim, num_relations, dropout_gnn) for _ in range(eff_layers)])
+        self.layers = nn.ModuleList([GatedGNNLayer(hidden_dim, num_relations, dropout_gnn, num_bases=num_bases, edge_dropout=edge_dropout) for _ in range(eff_layers)])
         # NOTE: full-model graph_emb dim is hidden_dim * num_layers * 3
         # (JK-concat add-pool + max-pool + virtual). At notebook defaults
         # (256 x 4) this is exactly 3072, matching the notebooks bit-for-bit.
@@ -171,8 +179,6 @@ class AdvancedASTGraphEncoder(nn.Module):
         x_subwords = data.x_subwords.clone()
 
         if self.training:
-            pass  # Removed asymmetric edge dropout
-
             # Step 2: In-loop token masking activated only for Adversarial variant
             if enable_token_masking:
                 subword_mask = torch.rand(x_subwords.size(0), device=x_subwords.device) < self.mask_rate
@@ -201,7 +207,8 @@ class AdvancedASTGraphEncoder(nn.Module):
                     # The unused gate Linear stays in the module on purpose:
                     # identical capacity means the comparison isolates the
                     # computation (gated blend vs addition), not model size.
-                    h = layer.dropout(F.gelu(layer.norm(layer.conv(x, edge_index, edge_type))))
+                    xi, xt = layer._drop_edges(edge_index, edge_type)
+                    h = layer.dropout(F.gelu(layer.norm(layer.conv(x, xi, xt))))
                     x = x + h
                 h_all.append(x)
             h_jk = h_all[-1] if self.jk_last_only else torch.cat(h_all, dim=-1)
@@ -358,6 +365,7 @@ def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation
         cls_hidden1=hp['cls_hidden1'], cls_hidden2=hp['cls_hidden2'],
         dropout_cls1=hp['dropout_cls1'], dropout_cls2=hp['dropout_cls2'],
         mask_rate=hp['mask_rate'], ablation=ablation,
+        num_bases=hp.get('num_bases', 4), edge_dropout=hp.get('edge_dropout', 0.1),
     ).to(device)
     return model, hp
 

@@ -77,6 +77,8 @@ def build_space(trial, language, preset):
     kw["weight_decay"] = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
     kw["batch_size"] = trial.suggest_categorical("batch_size", _batch_choices(language))
     kw["dropout_gnn"] = trial.suggest_float("dropout_gnn", 0.0, 0.4)
+    kw["num_bases"] = trial.suggest_categorical("num_bases", [2, 4, 8, 16])
+    kw["edge_dropout"] = trial.suggest_float("edge_dropout", 0.0, 0.3)
     if preset == "core":
         return kw
     # -- full preset: everything else output-affecting --
@@ -102,6 +104,7 @@ def space_snapshot(language, preset):
         "hidden_dim": [64, 128, 256, 384], "num_layers": [2, 5],
         "lr": "[1e-5, 2e-3] log", "weight_decay": "[1e-5, 1e-2] log",
         "batch_size": _batch_choices(language), "dropout_gnn": "[0.0, 0.4]",
+        "num_bases": [2, 4, 8, 16], "edge_dropout": "[0.0, 0.3]",
     }
     if preset == "full":
         snap.update({

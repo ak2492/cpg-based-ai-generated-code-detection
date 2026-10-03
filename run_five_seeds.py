@@ -78,7 +78,9 @@ def _scenario_name(suite):
 def run_language(language, seeds, adversarial=False, epochs=40, batch_size=None,
                  threshold=0.50, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
-                 rebuild_cache=False):
+                 rebuild_cache=False, lr=5e-5, weight_decay=1e-3,
+                 hidden_dim=256, num_layers=4, dropout_gnn=0.15,
+                 num_bases=4, edge_dropout=0.1):
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     ckpt_canon, ckpt_tpl = _ckpt_files(language, adversarial)
@@ -116,7 +118,10 @@ def run_language(language, seeds, adversarial=False, epochs=40, batch_size=None,
         else:
             trained, best_f1, best_roc = train_model(
                 language=language, epochs=epochs, batch_size=batch_size,
-                adversarial=adversarial, seed=seed)
+                adversarial=adversarial, seed=seed, lr=lr,
+                weight_decay=weight_decay, hidden_dim=hidden_dim,
+                num_layers=num_layers, dropout_gnn=dropout_gnn,
+                num_bases=num_bases, edge_dropout=edge_dropout)
             shutil.copyfile(ckpt_canon, seed_ckpt)
             print(f"Checkpoint archived -> {seed_ckpt}")
             # I delete the trained model here because the next seed allocates
@@ -242,6 +247,13 @@ if __name__ == "__main__":
                         help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",
                         help="Reuse existing *_seed{s}.pth files and keep other configs' CSV rows")
+    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--weight_decay", type=float, default=1e-3)
+    parser.add_argument("--hidden_dim", type=int, default=256)
+    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--dropout_gnn", type=float, default=0.15)
+    parser.add_argument("--num_bases", type=int, default=4)
+    parser.add_argument("--edge_dropout", type=float, default=0.1)
     parser.add_argument("--upload", action="store_true",
                         help="Upload per-seed .pth files to Hugging Face at the end")
     parser.add_argument("--upload-repo", type=str, default=None,
@@ -265,7 +277,11 @@ if __name__ == "__main__":
                               skip_external=args.skip_external,
                               out_csv=out_csv, resume=args.resume,
                               graphs_cache_dir=graphs_cache_dir,
-                              rebuild_cache=args.rebuild_cache)
+                              rebuild_cache=args.rebuild_cache,
+                              lr=args.lr, weight_decay=args.weight_decay,
+                              hidden_dim=args.hidden_dim, num_layers=args.num_layers,
+                              dropout_gnn=args.dropout_gnn,
+                              num_bases=args.num_bases, edge_dropout=args.edge_dropout)
         summary = summarize(df_all[df_all["Language"] == lang])
         summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 

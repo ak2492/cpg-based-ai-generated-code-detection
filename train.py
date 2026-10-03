@@ -63,7 +63,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
                        dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
-                       seed=42):
+                       seed=42, num_bases=4, edge_dropout=0.1):
     ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
@@ -77,6 +77,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
         dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
         mask_rate=mask_rate, ablation=ablation,
+        num_bases=num_bases, edge_dropout=edge_dropout,
     ).to(device)
     hyperparams = {
         'type_dim': type_dim, 'subword_dim': subword_dim, 'hidden_dim': hidden_dim,
@@ -84,7 +85,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         'pool_hidden': pool_hidden, 'film_hidden': film_hidden,
         'cls_hidden1': cls_hidden1, 'cls_hidden2': cls_hidden2,
         'dropout_cls1': dropout_cls1, 'dropout_cls2': dropout_cls2,
-        'mask_rate': mask_rate,
+        'mask_rate': mask_rate, 'num_bases': num_bases, 'edge_dropout': edge_dropout,
     }
 
     num_pos = sum(1 for g in train_graphs if g.y.item() == 1.0)
@@ -196,7 +197,8 @@ def train_model(language="python", epochs=40, batch_size=None, adversarial=False
                 type_dim=64, subword_dim=128, hidden_dim=256,
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
-                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full"):
+                 dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42,
+                 ablation="full", num_bases=4, edge_dropout=0.1):
     """Train one model from the saved bundle. Never builds CPGs.
 
     Seeds first so the DataLoader shuffle / dropout / token-masking trajectory
@@ -232,7 +234,8 @@ def train_model(language="python", epochs=40, batch_size=None, adversarial=False
                               pool_hidden=pool_hidden, film_hidden=film_hidden,
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
-                              mask_rate=mask_rate, ablation=ablation, seed=seed)
+                              mask_rate=mask_rate, ablation=ablation, seed=seed,
+                              num_bases=num_bases, edge_dropout=edge_dropout)
 
 
 def _add_hyper_args(parser):
@@ -257,6 +260,8 @@ def _add_hyper_args(parser):
     parser.add_argument("--dropout_cls1", type=float, default=0.3)
     parser.add_argument("--dropout_cls2", type=float, default=0.2)
     parser.add_argument("--mask_rate", type=float, default=0.15)
+    parser.add_argument("--num_bases", type=int, default=4)
+    parser.add_argument("--edge_dropout", type=float, default=0.1)
     return parser
 
 
@@ -294,4 +299,5 @@ if __name__ == "__main__":
                 pool_hidden=args.pool_hidden, film_hidden=args.film_hidden,
                 cls_hidden1=args.cls_hidden1, cls_hidden2=args.cls_hidden2,
                 dropout_cls1=args.dropout_cls1, dropout_cls2=args.dropout_cls2,
-                mask_rate=args.mask_rate)
+                mask_rate=args.mask_rate,
+                num_bases=args.num_bases, edge_dropout=args.edge_dropout)
