@@ -26,7 +26,7 @@ from language_configs import (
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
 from model import AdvancedASTGraphEncoder, ablation_checkpoint_path, canonical_ablation, save_checkpoint_for_language
-from attack_utils import current_rss_mb
+from attack_utils import current_rss_mb, execute_model_eval_with_cost, print_detailed_metrics_with_cost
 from pipeline import load_bundle_for_ablation, require_adv_graphs, seed_everything
 
 
@@ -48,7 +48,8 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        type_dim=64, subword_dim=128, hidden_dim=256,
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
-                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full"):
+                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
+                       test_graphs=None, test_every=5):
     ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
@@ -80,6 +81,10 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
 
     train_loader = DataLoader(train_graphs, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_graphs, batch_size=batch_size, shuffle=False)
+    # Read-only periodic-test loader: built once, shuffle=False, never affects RNG/trajectory.
+    test_loader = None
+    if test_graphs is not None and test_every and test_every > 0:
+        test_loader = DataLoader(test_graphs, batch_size=batch_size, shuffle=False)
 
     best_f1, best_roc = 0.0, 0.0
     best_weights = None
@@ -134,7 +139,30 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
             best_roc = cur_roc
             best_weights = copy.deepcopy(model.state_dict())
             epochs_no_improve = 0
+            early_stop_now = False
         elif (epochs_no_improve := epochs_no_improve + 1) >= patience:
+            early_stop_now = True
+        else:
+            early_stop_now = False
+
+        # Read-only periodic test: every `test_every` epochs, evaluate the
+        # best-so-far weights on the held-out test set and print only.
+        # Never writes checkpoints, never touches optimizer/scheduler/best_*.
+        if test_loader is not None and ((epoch + 1) % test_every == 0) and best_weights is not None:
+            was_training = model.training
+            cur_state = copy.deepcopy(model.state_dict())
+            try:
+                model.load_state_dict(best_weights)
+                model.eval()
+                test_res = execute_model_eval_with_cost(model, test_loader, device, threshold=threshold)
+                print(f"\n[PERIODIC TEST @ Epoch {epoch+1:02d}/{epochs} | Best Val F1 so far: {best_f1:.4f} | Best Val ROC so far: {best_roc:.4f}]")
+                tag = f"{language.upper()} {'Adv' if adversarial else 'Clean'}"
+                print_detailed_metrics_with_cost(tag, test_res)
+            finally:
+                model.load_state_dict(cur_state)
+                model.train(mode=was_training)
+
+        if early_stop_now:
             print(f"-> Early stopping cleanly triggered at epoch {epoch+1}.")
             break
 
@@ -168,7 +196,8 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                 type_dim=64, subword_dim=128, hidden_dim=256,
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
-                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full"):
+                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full",
+                test_every=5):
     """Train one model from the saved bundle. Never builds CPGs.
 
     Seeds first so the DataLoader shuffle / dropout / token-masking trajectory
@@ -193,6 +222,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
     else:
         train_graphs = bundle["train_clean_graphs"]
     val_graphs = bundle["val_graphs"]
+    test_graphs = bundle.get("test_graphs")
     return train_single_model(train_graphs, val_graphs, ctx, device, batch_size,
                               epochs=epochs, patience=patience,
                               adversarial=adversarial, language=language,
@@ -204,7 +234,8 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
                               pool_hidden=pool_hidden, film_hidden=film_hidden,
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
-                              mask_rate=mask_rate, ablation=ablation)
+                              mask_rate=mask_rate, ablation=ablation,
+                              test_graphs=test_graphs, test_every=test_every)
 
 
 def _add_hyper_args(parser):
@@ -246,6 +277,8 @@ if __name__ == "__main__":
                         help="Study config: a single id or '+'-joined combo "
                              "(full no-mp no-subword no-struct syntax-only no-gate no-jk "
                              "no-virtual mean-pool no-film); clean-only, namespaced checkpoint")
+    parser.add_argument("--test_every", type=int, default=5,
+                        help="Run read-only test on best-so-far weights every N epochs (0 disables). No training values are changed.")
     parser = _add_hyper_args(parser)
     args = parser.parse_args()
 
@@ -258,7 +291,7 @@ if __name__ == "__main__":
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
     train_model(language=args.language, epochs=args.epochs, batch_size=args.batch_size,
                 adversarial=args.adversarial, patience=args.patience, seed=args.seed,
-                ablation=args.ablation,
+                ablation=args.ablation, test_every=args.test_every,
                 lr=args.lr, weight_decay=args.weight_decay, tmax=args.tmax, eta_min=args.eta_min,
                 accum_steps=args.accum_steps, smooth_pos=args.smooth_pos, smooth_neg=args.smooth_neg,
                 grad_clip=args.grad_clip, threshold=args.threshold,
