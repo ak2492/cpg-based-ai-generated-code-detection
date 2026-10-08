@@ -322,19 +322,12 @@ def apply_statistical_attack_paper(code_str, rng, language="python"):
 
 
 def apply_statistical_attack_enhanced_identical(code_str, rng, language="python"):
-    """Identical enhanced-stat in both folders (stronger than basic, still valid).
-
-    I use trailing 1-6 on every line, blanks at 25%, indent 0-10 for Java/C++
-    and per-file style switch for Python because I want a visibly stronger
-    layout attack than basic (1-4/15%/0-8) that still parses. Same seed+idx
-    gives same output both folders.
-    """
     if not code_str or len(code_str) > MAX_CODE_SIZE:
         return code_str
     lines = code_str.split("\n")
     new_lines = []
     if language == "python":
-        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space"])
+        indent_style = rng.choice(["two_space", "tab", "three_space", "four_space", "single_space", "eight_space"])
         for line in lines:
             stripped = line.strip()
             if stripped:
@@ -346,27 +339,61 @@ def apply_statistical_attack_enhanced_identical(code_str, rng, language="python"
                     base_indent = "\t" * indent_level
                 elif indent_style == "three_space":
                     base_indent = "   " * indent_level
+                elif indent_style == "single_space":
+                    base_indent = " " * indent_level
+                elif indent_style == "eight_space":
+                    base_indent = "        " * indent_level
                 else:
                     base_indent = "    " * indent_level
-                trailing = " " * rng.randint(1, 6)
+                trailing = " " * rng.randint(1, 8)
+                if rng.random() < 0.30:
+                    trailing = trailing + "\t" * rng.randint(1, 2)
                 new_lines.append(base_indent + stripped + trailing)
-                if rng.random() < 0.25:
+                if rng.random() < 0.35:
                     new_lines.append("")
+                    if rng.random() < 0.20:
+                        new_lines.append("")
             else:
-                if rng.random() < 0.5:
+                if rng.random() < 0.50:
                     new_lines.append("")
     else:
         for line in lines:
             stripped = line.strip()
             if stripped:
-                indent = " " * rng.randint(0, 10)
-                trailing = " " * rng.randint(1, 6)
+                indent = " " * rng.randint(0, 12)
+                trailing = " " * rng.randint(1, 8)
+                if rng.random() < 0.30:
+                    trailing = trailing + "\t" * rng.randint(1, 2)
                 new_lines.append(indent + stripped + trailing)
-                if rng.random() < 0.25:
+                if rng.random() < 0.35:
                     new_lines.append("")
+                    if rng.random() < 0.20:
+                        new_lines.append("")
             else:
-                if rng.random() < 0.5:
+                if rng.random() < 0.50:
                     new_lines.append("")
+    return "\n".join(new_lines)
+
+
+def normalize_layout_enhanced_identical(code_str):
+    if not code_str or len(code_str) > MAX_CODE_SIZE:
+        return code_str
+    lines = code_str.split("\n")
+    lines = [l.rstrip() for l in lines]
+    new_lines = []
+    prev_blank = False
+    for line in lines:
+        if not line.strip():
+            if not prev_blank:
+                new_lines.append("")
+            prev_blank = True
+        else:
+            new_lines.append(line)
+            prev_blank = False
+    while new_lines and not new_lines[0].strip():
+        new_lines.pop(0)
+    while new_lines and not new_lines[-1].strip():
+        new_lines.pop()
     return "\n".join(new_lines)
 
 
@@ -532,13 +559,6 @@ def normalize_layout_java(code_str):
 
 
 def normalize_naming_style_paper(code_str, language, parser=None):
-    """Identical to Hybrid normalize_naming_style for all langs.
-
-    I normalize Camel/UPPER to snake and strip digits here because I think
-    uniform naming removes the lexical signal Hybrid relies on, while CPG
-    keeps its call/CFG skeleton so I expect the required 20% relative gap.
-    Returns (code, n_changed).
-    """
     parser = _get_parser_for(language, parser)
     try:
         if not code_str or len(code_str) > MAX_CODE_SIZE:
@@ -577,17 +597,6 @@ def normalize_naming_style_paper(code_str, language, parser=None):
 
 
 def meaning_preserving_rename_enhanced_shuffled_paper(code_str, language, parser=None, rng=None):
-    """Identical to Hybrid enhanced-shuffled for all langs (v7,v3,v1...).
-
-    I shuffle the v_i assignment with the same seeded RNG as Hybrid because
-    I want the same idx to yield the same augmented sample in both folders.
-    I keep func/class names in scope where safely changeable and I protect
-    keywords, builtins and dunders. I rename consistently everywhere (no
-    attribute-tail skip) because I think splitting def and use would look
-    like noise rather than a real obfuscation attack. Strings/prints use the
-    same coverage as Hybrid so F1/AUC move together except for the model gap.
-    Returns (code, n_transforms).
-    """
     import random as _random
     parser = _get_parser_for(language, parser)
     try:
@@ -600,7 +609,6 @@ def meaning_preserving_rename_enhanced_shuffled_paper(code_str, language, parser
         builtins = PAPER_BUILTINS.get(language, set())
         allowed = PAPER_VAR_PARENTS[language]
         reserved = PAPER_RESERVED[language]
-
         target_names = set()
         all_id_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in id_types]
         for node in all_id_nodes:
@@ -616,7 +624,6 @@ def meaning_preserving_rename_enhanced_shuffled_paper(code_str, language, parser
         r = rng if rng is not None else _random.Random(42 + SHUFFLE_SALT)
         r.shuffle(perm)
         var_map = {n: p for n, p in zip(ordered, perm)}
-
         all_id_nodes.sort(key=lambda n: n.start_byte, reverse=True)
         code_bytes = bytearray(code_bytes_raw)
         for node in all_id_nodes:
@@ -625,10 +632,9 @@ def meaning_preserving_rename_enhanced_shuffled_paper(code_str, language, parser
                 code_bytes[node.start_byte:node.end_byte] = bytes(var_map[name], "utf8")
                 n_transforms += 1
         code_str = code_bytes.decode("utf8", errors="ignore")
-
         code_bytes_raw = bytes(code_str, "utf8")
         tree = parser.parse(code_bytes_raw)
-        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal"}
+        string_types = {"string", "string_literal", "concatenated_string", "template_string", "raw_string_literal", "character_literal", "char_literal"}
         string_nodes = [n for n in _iter_nodes(tree.root_node) if n.type in string_types and (not n.parent or n.parent.type != "expression_statement")]
         if string_nodes:
             string_nodes.sort(key=lambda n: n.start_byte, reverse=True)
@@ -646,13 +652,13 @@ def meaning_preserving_rename_enhanced_shuffled_paper(code_str, language, parser
                 code_bytes[node.start_byte:node.end_byte] = bytes(replacement, "utf8")
                 n_transforms += 1
             code_str = code_bytes.decode("utf8", errors="ignore")
-
         if language == "python":
             code_str = re.sub(r'print\s*\(([^)]*)\)', 'print("output")', code_str)
         elif language == "java":
             code_str = re.sub(r'System\.out\.println\s*\(([^)]*)\)', 'System.out.println("output")', code_str)
         elif language == "cpp":
             code_str = re.sub(r'(std::)?cout\s*<<[^;]*;', 'std::cout << "output" << std::endl;', code_str)
+        code_str = re.sub(r'\b([2-9]|[1-9][0-9]+)\b', lambda m: hex(int(m.group(0))), code_str)
         return code_str, n_transforms
     except Exception:
         return code_str, 0
@@ -739,24 +745,15 @@ def apply_full_attack_basic_java(code_str, parser=None, rng=None, language="java
 
 def apply_full_attack_enhanced_java(code_str, parser=None, rng=None, language="java",
                                      base_seed=42, idx=0):
-    # Identical enhanced-full (auth+sem, no layout/stat) to hold CPG margin.
-    # Same seed+idx gives same sample as Hybrid. Legacy layout/stat kept
-    # in normalize_layout_java / apply_statistical_attack_enhanced_java.
     if rng is None:
         rng = random.Random(base_seed + idx + SHUFFLE_SALT)
     c, _ = strip_comments_paper(code_str, language, parser)
     c, _ = normalize_naming_style_paper(c, language, parser)
+    c = normalize_layout_enhanced_identical(c)
     c, _ = meaning_preserving_rename_enhanced_shuffled_paper(c, language, parser, rng)
+    rng_stat = random.Random(base_seed + idx)
+    c = apply_statistical_attack_enhanced_identical(c, rng_stat, language=language)
     return c
-
-
-# ---------------------------------------------------------------------------
-# Test-time generators — Paper Sec 4.7 protocol (machine-only, isolated).
-# Basic: paper canonical (serial v_i, isolated). Enhanced (identical in both
-# folders): strip + snake normalize + shuffled v7,v3,v1 rename + strings/prints,
-# layout/stat skipped for full to hold the 20% relative CPG margin I want.
-# Same base_seed+idx (+SHUFFLE_SALT for shuffle) gives same sample both sides.
-# ---------------------------------------------------------------------------
 
 def generate_python_attack_samples(dataset_split, attack_type, mode="enhanced",
                                    base_seed=42, target="machine", parser=None):
@@ -773,9 +770,6 @@ def generate_python_attack_samples(dataset_split, attack_type, mode="enhanced",
         if not c:
             continue
 
-        # Identical enhanced in both folders; same seed+idx gives same sample.
-        # Basic: paper serial + stat. Enhanced: strip + snake + shuffled, no
-        # layout/stat for full (I skip them to hold my 20% CPG margin).
         if attack_all or l == 1:
             c_mod = c
             rng = random.Random(base_seed + idx)
@@ -790,12 +784,12 @@ def generate_python_attack_samples(dataset_split, attack_type, mode="enhanced",
                 if attack_type in ["auth", "full"]:
                     c_mod, _ = strip_comments_paper(c_mod, "python", parser)
                     c_mod, _ = normalize_naming_style_paper(c_mod, "python", parser)
+                    c_mod = normalize_layout_enhanced_identical(c_mod)
                 if attack_type in ["sem", "full"]:
                     rng_shuf = random.Random(base_seed + idx + SHUFFLE_SALT)
                     c_mod, _ = meaning_preserving_rename_enhanced_shuffled_paper(
                         c_mod, "python", parser, rng_shuf)
-                if attack_type == "stat":
-                    # Identical stronger stat both folders (1-6/25%/0-10).
+                if attack_type in ["stat", "full"]:
                     c_mod = apply_statistical_attack_enhanced_identical(
                         c_mod, rng, language="python")
             attack_samples.append({'code': c_mod, 'label': l})
@@ -819,7 +813,6 @@ def generate_cpp_attack_samples(dataset_split, attack_type, mode="enhanced",
         if not c:
             continue
 
-        # Identical enhanced; same seed+idx gives same sample both folders.
         if attack_all or l == 1:
             c_mod = c
             rng = random.Random(base_seed + idx)
@@ -834,11 +827,12 @@ def generate_cpp_attack_samples(dataset_split, attack_type, mode="enhanced",
                 if attack_type in ["auth", "full"]:
                     c_mod, _ = strip_comments_paper(c_mod, "cpp", parser)
                     c_mod, _ = normalize_naming_style_paper(c_mod, "cpp", parser)
+                    c_mod = normalize_layout_enhanced_identical(c_mod)
                 if attack_type in ["sem", "full"]:
                     rng_shuf = random.Random(base_seed + idx + SHUFFLE_SALT)
                     c_mod, _ = meaning_preserving_rename_enhanced_shuffled_paper(
                         c_mod, "cpp", parser, rng_shuf)
-                if attack_type == "stat":
+                if attack_type in ["stat", "full"]:
                     c_mod = apply_statistical_attack_enhanced_identical(
                         c_mod, rng, language="cpp")
             attack_samples.append({'code': c_mod, 'label': l})
@@ -857,8 +851,6 @@ def generate_java_attack_samples(dataset_split, attack_type, mode="enhanced", pa
         if not c:
             continue
 
-        # Identical enhanced java: strip + snake + shuffled, no layout/stat
-        # for full (I skip them to hold my 20% CPG margin).
         if attack_all or l == 1:
             c_mod = c
             rng = random.Random(base_seed + idx)
@@ -873,11 +865,12 @@ def generate_java_attack_samples(dataset_split, attack_type, mode="enhanced", pa
                 if attack_type in ["auth", "full"]:
                     c_mod, _ = strip_comments_paper(c_mod, "java", parser)
                     c_mod, _ = normalize_naming_style_paper(c_mod, "java", parser)
+                    c_mod = normalize_layout_enhanced_identical(c_mod)
                 if attack_type in ["sem", "full"]:
                     rng_shuf = random.Random(base_seed + idx + SHUFFLE_SALT)
                     c_mod, _ = meaning_preserving_rename_enhanced_shuffled_paper(
                         c_mod, "java", parser, rng_shuf)
-                if attack_type == "stat":
+                if attack_type in ["stat", "full"]:
                     c_mod = apply_statistical_attack_enhanced_identical(
                         c_mod, rng, language="java")
             attack_samples.append({'code': c_mod, 'label': l})
