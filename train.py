@@ -40,7 +40,7 @@ TRAIN_TITLE = {
 }
 
 
-def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=45, patience=10,
+def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=30, patience=30,
                        adversarial=False, language="python",
                        lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
@@ -189,7 +189,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     return model, best_f1, best_roc
 
 
-def train_model(language="python", epochs=45, batch_size=None, adversarial=False, patience=10,
+def train_model(language="python", epochs=30, batch_size=None, adversarial=False, patience=30,
                 lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
@@ -266,11 +266,11 @@ def _add_hyper_args(parser):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
-    parser.add_argument("--epochs", type=int, default=45)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true",
                         help="Train the adversarially augmented variant (token masking on)")
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
     parser.add_argument("--ablation", type=str, default="full",
