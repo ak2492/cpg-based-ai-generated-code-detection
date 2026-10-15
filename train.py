@@ -42,7 +42,7 @@ TRAIN_TITLE = {
 
 def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=45, patience=10,
                        adversarial=False, language="python",
-                       lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
+                       lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                        grad_clip=1.0, threshold=0.50,
                        type_dim=64, subword_dim=128, hidden_dim=256,
@@ -190,7 +190,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
 
 
 def train_model(language="python", epochs=45, batch_size=None, adversarial=False, patience=10,
-                lr=5e-4, weight_decay=1e-3, tmax=45, eta_min=1e-6,
+                lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
                 type_dim=64, subword_dim=128, hidden_dim=256,
@@ -239,7 +239,7 @@ def train_model(language="python", epochs=45, batch_size=None, adversarial=False
 
 
 def _add_hyper_args(parser):
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-3)
     parser.add_argument("--accum_steps", type=int, default=2)
     parser.add_argument("--tmax", type=int, default=45)
