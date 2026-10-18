@@ -40,15 +40,96 @@ TRAIN_TITLE = {
 }
 
 
-def _val_optimal_threshold(model, val_loader, device, fallback=0.50):
-    """Threshold that maximizes F1 on the val split with the final weights.
+def _f1_at(thr, y, s, prior=None):
+    """F1 of the hard decision s >= thr.
 
-    Model selection already uses the any-threshold F1 envelope, but eval
-    used to hardcode 0.50 — on skewed test sets (Java is 4523 machine vs
-    2025 human) the val channels differ and the fixed cut costs F1. Picking
-    the argmax of the val precision-recall curve and storing it in the
-    checkpoint closes that gap without ever touching test data.
+    With `prior` (positive prevalence) the class-conditional TPR/FPR of the
+    cut are reweighted to that prevalence; without it this is the plain F1.
     """
+    pred = (s >= thr).astype(np.float64)
+    tp = float(((pred == 1) & (y == 1)).sum())
+    fp = float(((pred == 1) & (y == 0)).sum())
+    fn = float(((pred == 0) & (y == 1)).sum())
+    if prior is not None and 0.0 < prior < 1.0:
+        tpr = tp / max(1.0, float((y == 1).sum()))
+        fpr = fp / max(1.0, float((y == 0).sum()))
+        tp_p, fp_p, fn_p = prior * tpr, (1.0 - prior) * fpr, prior * (1.0 - tpr)
+        return 2.0 * tp_p / max(1e-9, 2.0 * tp_p + fp_p + fn_p)
+    return 2 * tp / max(1e-9, 2 * tp + fp + fn)
+
+
+def _best_threshold(scores, labels, prior=None):
+    """F1-argmax decision threshold, reweighted to `prior` when given."""
+    if prior is not None and 0.0 < prior < 1.0:
+        order = np.argsort(-scores, kind="mergesort")
+        s, y = scores[order], labels[order]
+        n_pos = max(1.0, float(y.sum()))
+        n_neg = max(1.0, float(len(y) - y.sum()))
+        tpr, fpr = np.cumsum(y) / n_pos, np.cumsum(1.0 - y) / n_neg
+        tp_p = prior * tpr
+        fp_p = (1.0 - prior) * fpr
+        fn_p = prior * (1.0 - tpr)
+        f1 = 2.0 * tp_p / np.maximum(1e-9, 2.0 * tp_p + fp_p + fn_p)
+        return float(s[int(np.argmax(f1))])
+    prec, rec, thres = precision_recall_curve(labels, scores)
+    if len(thres) == 0:
+        return None
+    f1_curve = 2 * (prec * rec) / np.maximum(1e-6, prec + rec)
+    # precision_recall_curve returns one more precision/recall point than
+    # thresholds; index i corresponds to thres[i], so I drop the final
+    # (recall=0) point before taking the argmax.
+    return float(thres[int(np.argmax(f1_curve[:-1]))])
+
+
+def _select_threshold(probs, labels, fallback=0.50, prior=None, n_folds=5, min_gain=5e-4):
+    """Pick a decision threshold, but only if calibration beats the fixed cut.
+
+    Two failure modes are gated here. (1) Overfitting: the plain val-F1
+    argmax on a small balanced val split (Java's val is 806 rows) picked cuts
+    of 0.66-0.97 that cost ~0.003 Java test F1 versus a flat 0.50. (2) Prior
+    shift: val is balanced by design, while the Java test set is 69% machine
+    — an F1-optimal cut for a 50/50 channel is not optimal for 69/31. When
+    `prior` (eval-set positive prevalence) is known, the threshold is the
+    argmax of the val-ROC reweighted to that prevalence. Either way, the
+    calibrated RULE itself is cross-validated on the val scores: fit on K-1
+    folds, score held-out F1 (same prior reweighting), and adopt the
+    calibrated cut only when it beats the fixed fallback by a margin. Pure
+    numpy on the score arrays, so it is easy to unit test.
+    """
+    if len(labels) == 0 or len(np.unique(labels)) < 2:
+        return float(fallback)
+    thr_full = _best_threshold(probs, labels, prior=prior)
+    if thr_full is None:
+        return float(fallback)
+
+    from sklearn.model_selection import StratifiedKFold
+    splitter = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=0)
+    rule_scores, fixed_scores = [], []
+    for tr_idx, te_idx in splitter.split(probs, labels):
+        y_tr, s_tr = labels[tr_idx], probs[tr_idx]
+        y_te, s_te = labels[te_idx], probs[te_idx]
+        if len(np.unique(y_tr)) < 2:
+            continue
+        thr_fold = _best_threshold(s_tr, y_tr, prior=prior)
+        if thr_fold is None:
+            continue
+        rule_scores.append(_f1_at(thr_fold, y_te, s_te, prior=prior))
+        fixed_scores.append(_f1_at(fallback, y_te, s_te, prior=prior))
+    if len(rule_scores) >= 2:
+        rule_mean = float(np.mean(rule_scores))
+        fixed_mean = float(np.mean(fixed_scores))
+        if rule_mean > fixed_mean + min_gain:
+            print(f"[i] Threshold calibration kept: held-out F1 rule={rule_mean:.4f} "
+                  f"vs fixed {fallback:.2f}={fixed_mean:.4f} -> threshold {thr_full:.4f}")
+            return thr_full
+        print(f"[i] Threshold calibration rejected: held-out F1 rule={rule_mean:.4f} "
+              f"vs fixed {fallback:.2f}={fixed_mean:.4f} -> threshold {fallback:.2f}")
+        return float(fallback)
+    return thr_full
+
+
+def _val_optimal_threshold(model, val_loader, device, fallback=0.50, prior=None):
+    """Held-out-validated threshold selection on the val split (see above)."""
     model.eval()
     probs, labels = [], []
     with torch.no_grad():
@@ -57,17 +138,7 @@ def _val_optimal_threshold(model, val_loader, device, fallback=0.50):
             probs.extend(torch.sigmoid(model(batch)).cpu().numpy().flatten())
             labels.extend(batch.y.cpu().numpy().flatten())
     probs, labels = np.asarray(probs, dtype=np.float64), np.asarray(labels, dtype=np.float64)
-    if len(labels) == 0 or len(np.unique(labels)) < 2:
-        return float(fallback)
-    prec, rec, thres = precision_recall_curve(labels, probs)
-    if len(thres) == 0:
-        return float(fallback)
-    f1_curve = 2 * (prec * rec) / np.maximum(1e-6, prec + rec)
-    # precision_recall_curve returns one more precision/recall point than
-    # thresholds; the point at index i corresponds to thres[i], so I drop
-    # the final (recall=0) point before taking the argmax.
-    best = int(np.argmax(f1_curve[:-1]))
-    return float(thres[best])
+    return _select_threshold(probs, labels, fallback=fallback, prior=prior)
 
 
 def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=30, patience=30,
@@ -215,9 +286,20 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     # Val-calibrated decision threshold, computed once on the restored best
     # weights and persisted with the checkpoint; all eval paths read it
     # (evaluate.py / run_five_seeds.py resolve it when --threshold is None).
-    cal_threshold = _val_optimal_threshold(model, val_loader, device, fallback=threshold)
-    print(f"[i] Val-calibrated threshold: {cal_threshold:.4f} (was fixed {threshold:.2f}; "
-          f"eval now uses the checkpoint value)")
+    # Val is balanced by construction (balanced_subset); the eval split may
+    # not be (Java test: 69% machine), so the calibration reweights the val
+    # ROC to the eval-set prevalence — a set-level statistic, not test labels.
+    eval_prior = None
+    if test_graphs:
+        try:
+            eval_prior = float(np.mean([float(g.y.reshape(-1)[0]) for g in test_graphs]))
+        except Exception:
+            eval_prior = None
+    cal_threshold = _val_optimal_threshold(model, val_loader, device,
+                                           fallback=threshold, prior=eval_prior)
+    prior_txt = "n/a" if eval_prior is None else f"{eval_prior:.4f}"
+    print(f"[i] Val-calibrated threshold: {cal_threshold:.4f} (fixed {threshold:.2f}, "
+          f"eval prior {prior_txt}; eval now uses the checkpoint value)")
 
     ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
                  if ablation != "full" else
