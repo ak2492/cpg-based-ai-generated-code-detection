@@ -769,12 +769,29 @@ def build_optimized_ast_graph(source_code, label, ctx):
     )
 
 
-def process_split(split, desc, ctx):
+def process_split(split, desc, ctx, semantic=None):
+    """Build graphs for every row in `split`.
+
+    `semantic` controls the CodeT5+ branch: None (default) -> follow the
+    process-wide switch in semantic_features (env CPG_SEMANTIC, default ON),
+    True/False forces it. Texts are kept in lockstep with built graphs so a
+    skipped sample can never misalign an embedding.
+    """
+    if semantic is None:
+        from semantic_features import semantic_enabled
+        semantic = semantic_enabled()
     out = []
+    texts = []
     for item in tqdm(split, desc=desc):
-        g = build_optimized_ast_graph(item.get('text', item.get('code', '')), item.get('label', item.get('target', 0)), ctx)
+        code = item.get('text', item.get('code', ''))
+        g = build_optimized_ast_graph(code, item.get('label', item.get('target', 0)), ctx)
         if g is not None:
             out.append(g)
+            if semantic:
+                texts.append(code)
+    if semantic and out:
+        from semantic_features import embed_graphs
+        embed_graphs(out, texts)
     return out
 
 

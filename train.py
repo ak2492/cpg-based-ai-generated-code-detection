@@ -40,6 +40,36 @@ TRAIN_TITLE = {
 }
 
 
+def _val_optimal_threshold(model, val_loader, device, fallback=0.50):
+    """Threshold that maximizes F1 on the val split with the final weights.
+
+    Model selection already uses the any-threshold F1 envelope, but eval
+    used to hardcode 0.50 — on skewed test sets (Java is 4523 machine vs
+    2025 human) the val channels differ and the fixed cut costs F1. Picking
+    the argmax of the val precision-recall curve and storing it in the
+    checkpoint closes that gap without ever touching test data.
+    """
+    model.eval()
+    probs, labels = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch = batch.to(device)
+            probs.extend(torch.sigmoid(model(batch)).cpu().numpy().flatten())
+            labels.extend(batch.y.cpu().numpy().flatten())
+    probs, labels = np.asarray(probs, dtype=np.float64), np.asarray(labels, dtype=np.float64)
+    if len(labels) == 0 or len(np.unique(labels)) < 2:
+        return float(fallback)
+    prec, rec, thres = precision_recall_curve(labels, probs)
+    if len(thres) == 0:
+        return float(fallback)
+    f1_curve = 2 * (prec * rec) / np.maximum(1e-6, prec + rec)
+    # precision_recall_curve returns one more precision/recall point than
+    # thresholds; the point at index i corresponds to thres[i], so I drop
+    # the final (recall=0) point before taking the argmax.
+    best = int(np.argmax(f1_curve[:-1]))
+    return float(thres[best])
+
+
 def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=30, patience=30,
                        adversarial=False, language="python",
                        lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
@@ -49,10 +79,21 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
                        dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
+                       semantic_dim=None, sem_hidden=256, sem_dropout=0.2,
                        test_graphs=None, test_every=5):
     ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
+    # I probe the bundle here (instead of a CLI default) because the semantic
+    # width is a property of the data: bundles built with main.py --no-semantic
+    # have no `.sem` and must keep training the pre-semantic architecture.
+    if semantic_dim is None:
+        from semantic_features import probe_semantic_dim
+        semantic_dim = probe_semantic_dim(train_graphs)
+        print(f"[i] Semantic branch: {'CodeT5+ ' + str(semantic_dim) + '-d CLS' if semantic_dim else 'disabled (bundle has no embeddings)'}")
+    if semantic_dim and ablation != "full":
+        print(f"[i] Ablation '{ablation}' trains on the semantic bundle; "
+              f"the branch is only active when the config keeps it.")
     model = AdvancedASTGraphEncoder(
         num_node_types=ctx.vocab_size,
         bpe_vocab_size=BPE_VOCAB_SIZE,
@@ -63,6 +104,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
         dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
         mask_rate=mask_rate, ablation=ablation,
+        semantic_dim=semantic_dim, sem_hidden=sem_hidden, sem_dropout=sem_dropout,
     ).to(device)
     hyperparams = {
         'type_dim': type_dim, 'subword_dim': subword_dim, 'hidden_dim': hidden_dim,
@@ -71,6 +113,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         'cls_hidden1': cls_hidden1, 'cls_hidden2': cls_hidden2,
         'dropout_cls1': dropout_cls1, 'dropout_cls2': dropout_cls2,
         'mask_rate': mask_rate,
+        'semantic_dim': semantic_dim, 'sem_hidden': sem_hidden, 'sem_dropout': sem_dropout,
     }
 
     num_pos = sum(1 for g in train_graphs if g.y.item() == 1.0)
@@ -169,11 +212,18 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     if best_weights is not None:
         model.load_state_dict(best_weights)
 
+    # Val-calibrated decision threshold, computed once on the restored best
+    # weights and persisted with the checkpoint; all eval paths read it
+    # (evaluate.py / run_five_seeds.py resolve it when --threshold is None).
+    cal_threshold = _val_optimal_threshold(model, val_loader, device, fallback=threshold)
+    print(f"[i] Val-calibrated threshold: {cal_threshold:.4f} (was fixed {threshold:.2f}; "
+          f"eval now uses the checkpoint value)")
+
     ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
                  if ablation != "full" else
                  (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
     save_checkpoint_for_language(language, ckpt_file, model, optimizer, epoch,
-                                 best_f1, best_roc, threshold,
+                                 best_f1, best_roc, cal_threshold,
                                  ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
                                  hyperparams, ablation)
 
@@ -197,6 +247,7 @@ def train_model(language="python", epochs=30, batch_size=None, adversarial=False
                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
                 dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full",
+                semantic_dim=None, sem_hidden=256, sem_dropout=0.2,
                 test_every=5):
     """Train one model from the saved bundle. Never builds CPGs.
 
@@ -206,7 +257,7 @@ def train_model(language="python", epochs=30, batch_size=None, adversarial=False
     accuracy shifts by ~1pt on identical code. I expose `seed` because I want
     5-seed averages (42-46) over identical data and bundles.
 
-    `ablation` selects one of the ten study configs (clean-only, test-set
+    `ablation` selects one of the eleven study configs (clean-only, test-set
     eval). Graph-changing ablations derive their graphs from the standard
     bundle in-memory (no re-parsing); the checkpoint is namespaced per config
     so study runs never clobber the main checkpoints.
@@ -235,6 +286,8 @@ def train_model(language="python", epochs=30, batch_size=None, adversarial=False
                               cls_hidden1=cls_hidden1, cls_hidden2=cls_hidden2,
                               dropout_cls1=dropout_cls1, dropout_cls2=dropout_cls2,
                               mask_rate=mask_rate, ablation=ablation,
+                              semantic_dim=semantic_dim, sem_hidden=sem_hidden,
+                              sem_dropout=sem_dropout,
                               test_graphs=test_graphs, test_every=test_every)
 
 
@@ -247,7 +300,9 @@ def _add_hyper_args(parser):
     parser.add_argument("--smooth_pos", type=float, default=0.975)
     parser.add_argument("--smooth_neg", type=float, default=0.025)
     parser.add_argument("--grad_clip", type=float, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=0.50,
+                        help="Fallback decision threshold; the saved checkpoint always "
+                             "carries the val-F1-optimal threshold instead")
     parser.add_argument("--type_dim", type=int, default=64)
     parser.add_argument("--subword_dim", type=int, default=128)
     parser.add_argument("--hidden_dim", type=int, default=256)
@@ -260,6 +315,13 @@ def _add_hyper_args(parser):
     parser.add_argument("--dropout_cls1", type=float, default=0.3)
     parser.add_argument("--dropout_cls2", type=float, default=0.2)
     parser.add_argument("--mask_rate", type=float, default=0.15)
+    parser.add_argument("--semantic_dim", type=int, default=None,
+                        help="CodeT5+ embedding width (default: auto-probe the bundle; "
+                             "768 with semantic bundles, 0 without). Use 0 to force the "
+                             "pre-semantic architecture.")
+    parser.add_argument("--sem_hidden", type=int, default=256,
+                        help="Projection width of the semantic branch before classifier concat")
+    parser.add_argument("--sem_dropout", type=float, default=0.2)
     return parser
 
 
@@ -276,7 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--ablation", type=str, default="full",
                         help="Study config: a single id or '+'-joined combo "
                              "(full no-mp no-subword no-struct syntax-only no-gate no-jk "
-                             "no-virtual mean-pool no-film); clean-only, namespaced checkpoint")
+                             "no-virtual mean-pool no-film no-semantic); clean-only, namespaced checkpoint")
     parser.add_argument("--test_every", type=int, default=5,
                         help="Run read-only test on best-so-far weights every N epochs (0 disables). No training values are changed.")
     parser = _add_hyper_args(parser)
@@ -300,4 +362,6 @@ if __name__ == "__main__":
                 pool_hidden=args.pool_hidden, film_hidden=args.film_hidden,
                 cls_hidden1=args.cls_hidden1, cls_hidden2=args.cls_hidden2,
                 dropout_cls1=args.dropout_cls1, dropout_cls2=args.dropout_cls2,
-                mask_rate=args.mask_rate)
+                mask_rate=args.mask_rate,
+                semantic_dim=args.semantic_dim, sem_hidden=args.sem_hidden,
+                sem_dropout=args.sem_dropout)

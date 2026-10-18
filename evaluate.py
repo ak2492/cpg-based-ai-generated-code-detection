@@ -16,12 +16,13 @@ import torch
 from torch_geometric.loader import DataLoader
 
 from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import ablation_checkpoint_path, build_encoder_from_checkpoint, canonical_ablation, checkpoint_ablation
+from model import (ablation_checkpoint_path, build_encoder_from_checkpoint, canonical_ablation,
+                   checkpoint_ablation, checkpoint_threshold)
 from attack_utils import execute_model_eval_with_cost, print_detailed_metrics_with_cost
 from pipeline import load_bundle_for_ablation, seed_everything
 
 
-def evaluate_model(language="python", batch_size=None, adversarial=False, threshold=0.50, seed=42, ablation="full"):
+def evaluate_model(language="python", batch_size=None, adversarial=False, threshold=None, seed=42, ablation="full"):
     # I seed here for completeness; inference itself is deterministic
     # (shuffle=False), so varying seed must not change these scores.
     seed_everything(seed)
@@ -45,6 +46,10 @@ def evaluate_model(language="python", batch_size=None, adversarial=False, thresh
         raise ValueError(
             f"Ablation mismatch: --ablation {ablation} but checkpoint {ckpt_file} "
             f"holds a different config. Graphs and encoder would silently disagree.")
+    if threshold is None:
+        # Val-calibrated cut saved by train.py; old checkpoints -> 0.50.
+        threshold = checkpoint_threshold(ckpt_file, device)
+        print(f"[i] Decision threshold from checkpoint: {threshold:.4f}")
     model, _ = build_encoder_from_checkpoint(ctx, ckpt_file, device)
     model.eval()
 
@@ -67,7 +72,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true",
                         help="Evaluate the adversarially trained checkpoint instead of clean")
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision threshold (default: the checkpoint's val-calibrated value)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed (inference is deterministic; kept for 5-seed protocol uniformity)")
     parser.add_argument("--ablation", type=str, default="full",

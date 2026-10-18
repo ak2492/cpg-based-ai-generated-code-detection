@@ -9,7 +9,19 @@ as an executable GitHub-style module, following the same CLI conventions as
 Each language builds 28-d node stylometry + 37-d macro features + BPE subwords
 into a 16-relation graph (AST parent/child, siblings, use-chains, leaf order,
 virtual node, def-use, CFG, call, arg-param) encoded by a 4-layer gated RGCN
-(`AdvancedASTGraphEncoder`) with FiLM global conditioning.
+(`AdvancedASTGraphEncoder`) with FiLM global conditioning, fused with a
+CodeT5+ (`Salesforce/codet5p-220m`) 768-d CLS semantic embedding — the base
+paper's strongest single feature class (its semantic-only ablation nearly
+matches the full model). The semantic vector is computed once per sample at
+bundle-build time and stored on each graph as `.sem`, so training, attacks,
+and external suites all reuse it; the classifier consumes
+`[graph_emb ‖ sem_proj(sem)]`.
+
+Decision thresholds are calibrated, not guessed: `train.py` picks the
+validation-F1-optimal cut after restoring the best weights and stores it in
+the checkpoint as `optimal_threshold`; `evaluate.py`, the attack suites, the
+external suites, and `run_five_seeds.py` all resolve that value instead of
+hardcoding 0.50 (pass `--threshold` to force a specific cut).
 
 ---
 
@@ -40,6 +52,8 @@ default = clean, `--adversarial` = adv variant.
 
 ```bash
 # Step 1 — build CPGs (Cell 1; trains NOTHING), saves {language}_cpg_bundle.pt
+# (also precomputes CodeT5+ 768-d semantic embeddings per sample; add
+#  --no-semantic to skip, e.g. for a fast no-GPU debug run)
 python main.py --language python
 python main.py --language java
 python main.py --language cpp --trial-samples 500 --limit 200
@@ -99,16 +113,21 @@ Hyperparameter flags (`train.py`; omit any flag for the notebook default):
   `--pool_hidden` 128, `--film_hidden` 128, `--cls_hidden1` 256,
   `--cls_hidden2` 64, `--dropout_cls1` 0.3, `--dropout_cls2` 0.2,
   `--mask_rate` 0.15
+- Semantic branch: `--semantic_dim` (default: auto — 768 when the bundle has
+  embeddings, else 0; `0` forces the pre-semantic architecture for old bundles),
+  `--sem_hidden` 256, `--sem_dropout` 0.2
 - Training: `--lr` 5e-4, `--weight_decay` 1e-3, `--epochs` 45,
   `--patience` 10, `--accum_steps` 2, `--tmax` 45, `--eta_min` 1e-6,
   `--smooth_pos` 0.975, `--smooth_neg` 0.025, `--grad_clip` 1.0,
-  `--threshold` 0.50, `--batch_size` per-language default
+  `--threshold` fallback-only (checkpoints always store the val-calibrated
+  value), `--batch_size` per-language default
 - Locked (no flag; changing them breaks graph/checkpoint compat):
   `struct_dim=28`, `num_relations=16`, `global_dim=37` (37-d macro stats),
   conv kernel 3, BPE/subword sizes,
   `MAX_NODES`/`MAX_DEPTH`, augmentation rates, attack magnitudes
-- Checkpoints store their `hyperparams`; eval/attack/external rebuild the
-  model from them (old checkpoints fall back to notebook defaults)
+- Checkpoints store their `hyperparams` (including `semantic_dim`); eval/
+  attack/external rebuild the model from them (old checkpoints fall back to
+  notebook defaults, i.e. no semantic branch)
 
 Determinism: `main.py` and `train.py` both seed all RNGs with 42 first
 (notebook Cell-1 state), so DataLoader shuffling, dropout, and token masking
@@ -125,6 +144,7 @@ val_roc, optimal_threshold, normalization_means/stds, global_means/stds`.
 ## Layout
 
 - `data_loader.py` — `balanced_subset` + magecode loading (shared, identical)
+- `semantic_features.py` — CodeT5+ (`codet5p-220m`) 768-d CLS embeddings, attached at parse time
 - `language_configs.py` — per-language RESERVED/TEXT_CAPTURE/SCOPE/triggers + shared RE/LAZY/MAGIC/BATCH defaults
 - `graph_builder.py` — shared stylometry/macro/graph/normalization skeleton with per-language dispatch (outputs identical)
 - `model.py` — `GatedGNNLayer` + `AdvancedASTGraphEncoder` (shared) + per-language save wrappers

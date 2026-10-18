@@ -17,7 +17,8 @@ def main():
     ap.add_argument("--batch_size", type=int, default=None)
     ap.add_argument("--base_seed", type=int, default=42)
     ap.add_argument("--adversarial", action="store_true")
-    ap.add_argument("--threshold", type=float, default=0.50)
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="Decision threshold (default: checkpoint's val-calibrated value)")
     args = ap.parse_args()
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]

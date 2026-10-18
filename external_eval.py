@@ -545,7 +545,9 @@ if __name__ == "__main__":
     parser.add_argument("--suite", type=str, default="all",
                         choices=["semeval_A", "semeval_B", "hmcorp", "gptsniffer", "all"])
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision threshold (default: checkpoint's val-calibrated value; "
+                             "'both' variant uses the clean checkpoint's threshold)")
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--variant", type=str, default="both", choices=["both", "clean", "adv"],
                         help="Which checkpoint(s) to evaluate (both = notebook behavior)")
@@ -554,6 +556,11 @@ if __name__ == "__main__":
     set_seed(args.base_seed)
     if args.batch_size is None:
         args.batch_size = DEFAULT_BATCH_SIZE[args.language]
+    if args.threshold is None:
+        from model import checkpoint_threshold
+        ckpt = ADV_CHECKPOINT[args.language] if args.variant == "adv" else CLEAN_CHECKPOINT[args.language]
+        args.threshold = checkpoint_threshold(ckpt)
+        print(f"[i] Decision threshold from checkpoint: {args.threshold:.4f}")
     bundle = load_bundle(args.language)
 
     def _run_semeval(subtask, multiclass):

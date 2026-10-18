@@ -17,4 +17,6 @@ numpy
 huggingface_hub
 scipy
 psutil
+transformers  # CodeT5+ semantic branch (Salesforce/codet5p-220m)
+sentencepiece  # CodeT5+ tokenizer (T5 sentencepiece)
 optuna  # bayes_search.py only (Bayesian TPE grid search)

@@ -66,7 +66,8 @@ LOADED_MSG = {
 }
 
 
-def prepare_graphs(language="python", trial_samples=None, limit=None, adversarial=False, seed=SEED):
+def prepare_graphs(language="python", trial_samples=None, limit=None, adversarial=False, seed=SEED,
+                   semantic=None):
     """Full Cell-1 pipeline. `limit` caps balanced splits for quick debugging (None = notebook exact).
 
     The adversarial pool (augmentation + adv graph parsing, ~40% of Cell-1
@@ -74,6 +75,11 @@ def prepare_graphs(language="python", trial_samples=None, limit=None, adversaria
     `main.py --adversarial`. Without the flag, `train_adv_*` entries are None
     and only clean/val/test splits are normalized (normalization is always
     fit on clean, so those outputs are bit-identical either way).
+
+    `semantic` (None = follow semantic_features' switch, default ON) attaches
+    a CodeT5+ CLS embedding to every built graph, making this bundle ~15-20
+    min slower to build on GPU but giving the classifier the paper's
+    dominant feature class.
 
     I seed model RNG from `seed` here but keep data splits locked at SEED
     below, because I want 5-seed averages to compare identical rows with
@@ -106,25 +112,25 @@ def prepare_graphs(language="python", trial_samples=None, limit=None, adversaria
     ctx = GraphContext(language, parser, type_to_id, vocab_size, bpe_tokenizer, pad_id, token_to_rank, max_rank)
 
     d_clean, d_adv, d_val, d_test = SPLIT_DESC[language]
-    train_clean_graphs = process_split(train_clean_data, d_clean, ctx)
+    train_clean_graphs = process_split(train_clean_data, d_clean, ctx, semantic=semantic)
     if adversarial:
-        train_adv_graphs = process_split(train_adv_data, d_adv, ctx)
+        train_adv_graphs = process_split(train_adv_data, d_adv, ctx, semantic=semantic)
     else:
         train_adv_graphs = None
-    val_graphs = process_split(val_eval_data, d_val, ctx)
+    val_graphs = process_split(val_eval_data, d_val, ctx, semantic=semantic)
 
     if language == "cpp":
         # Balanced Test set extraction to eliminate base-rate skew (C++ only)
         test_balanced_raw = balanced_subset(test_data, seed=42)
         if limit is not None:
             test_balanced_raw = test_balanced_raw.select(range(min(limit, len(test_balanced_raw))))
-        test_graphs = process_split(test_balanced_raw, d_test, ctx)
+        test_graphs = process_split(test_balanced_raw, d_test, ctx, semantic=semantic)
     else:
         # Full test set, no balancing (python/java)
         test_balanced_raw = test_data
         if limit is not None:
             test_balanced_raw = test_balanced_raw.select(range(min(limit, len(test_balanced_raw))))
-        test_graphs = process_split(test_balanced_raw, d_test, ctx)
+        test_graphs = process_split(test_balanced_raw, d_test, ctx, semantic=semantic)
 
     fit_normalization(train_clean_graphs, ctx)
     built_splits = [s for s in (train_clean_graphs, train_adv_graphs, val_graphs, test_graphs) if s is not None]
@@ -161,6 +167,7 @@ def save_bundle(bundle, trial_samples=None, limit=None, path=None):
     ctx = bundle["ctx"]
     language = ctx.language
     path = path or bundle_path(language)
+    has_semantic = _bundle_has_semantic(bundle)
     payload = {
         "language": language,
         "trial_samples": trial_samples,
@@ -176,14 +183,24 @@ def save_bundle(bundle, trial_samples=None, limit=None, path=None):
         "g_means": ctx.g_means,
         "g_stds": ctx.g_stds,
         "has_adv": bundle.get("train_adv_graphs") is not None,
+        "has_semantic": has_semantic,
         "train_clean_graphs": bundle["train_clean_graphs"],
         "train_adv_graphs": bundle.get("train_adv_graphs"),
         "val_graphs": bundle["val_graphs"],
         "test_graphs": bundle["test_graphs"],
     }
     torch.save(payload, path)
-    print(f"[+] CPG bundle saved at: {path} (adv graphs: {'yes' if payload['has_adv'] else 'no'})")
+    print(f"[+] CPG bundle saved at: {path} (adv graphs: {'yes' if payload['has_adv'] else 'no'}, "
+          f"semantic: {'yes' if has_semantic else 'no'})")
     return path
+
+
+def _bundle_has_semantic(bundle):
+    """Probe any split graph for the CodeT5+ `.sem` field."""
+    for split in (bundle.get("train_clean_graphs"), bundle.get("val_graphs"), bundle.get("test_graphs")):
+        if split:
+            return getattr(split[0], "sem", None) is not None
+    return False
 
 
 def load_bundle(language, path=None):
@@ -226,12 +243,16 @@ def load_bundle(language, path=None):
     )
     ctx.means, ctx.stds, ctx.g_means, ctx.g_stds = (
         payload["means"], payload["stds"], payload["g_means"], payload["g_stds"])
+    has_semantic = payload.get("has_semantic")
+    if has_semantic is None and _probe is not None:
+        has_semantic = getattr(_probe, "sem", None) is not None
     return {
         "ctx": ctx,
         "parser": parser,
         "trial_samples": payload.get("trial_samples"),
         "limit": payload.get("limit"),
         "has_adv": payload.get("has_adv", payload.get("train_adv_graphs") is not None),
+        "has_semantic": has_semantic,
         "train_clean_graphs": payload["train_clean_graphs"],
         "train_adv_graphs": payload.get("train_adv_graphs"),
         "val_graphs": payload["val_graphs"],
@@ -275,12 +296,15 @@ def _filter_graph_edges(graphs, keep_types):
     for g in graphs:
         mask = torch.isin(g.edge_attr,
                           torch.tensor(keep_types, dtype=g.edge_attr.dtype))
-        out.append(Data(
+        g2 = Data(
             x_type=g.x_type.clone(), x_struct=g.x_struct.clone(), x_subwords=g.x_subwords.clone(),
             edge_index=g.edge_index[:, mask].clone(), edge_attr=g.edge_attr[mask].clone(),
             y=g.y.clone(), num_nodes=int(g.num_nodes),
             virtual_idx=int(g.virtual_idx), global_stats=g.global_stats.clone(),
-        ))
+        )
+        if getattr(g, "sem", None) is not None:
+            g2.sem = g.sem.clone()
+        out.append(g2)
     return out
 
 
@@ -294,13 +318,16 @@ def _strip_virtual_node(graphs):
         assert v == n - 1, f"Virtual node must be last (got virtual_idx={v}, num_nodes={n})"
         keep_edge = ((g.edge_index[0] != v) & (g.edge_index[1] != v) & (g.edge_attr != 8))
         assert bool(keep_edge.any()), "no-virtual variant left a graph with zero edges"
-        out.append(Data(
+        g2 = Data(
             x_type=g.x_type[:-1].clone(), x_struct=g.x_struct[:-1].clone(),
             x_subwords=g.x_subwords[:-1].clone(),
             edge_index=g.edge_index[:, keep_edge].clone(), edge_attr=g.edge_attr[keep_edge].clone(),
             y=g.y.clone(), num_nodes=n - 1,
             virtual_idx=-1, global_stats=g.global_stats.clone(),
-        ))
+        )
+        if getattr(g, "sem", None) is not None:
+            g2.sem = g.sem.clone()
+        out.append(g2)
     return out
 
 
@@ -338,6 +365,7 @@ def derive_variant_bundle(bundle, variant):
         "trial_samples": bundle.get("trial_samples"),
         "limit": bundle.get("limit"),
         "has_adv": False,
+        "has_semantic": bundle.get("has_semantic"),
         "train_clean_graphs": train,
         "train_adv_graphs": None,
         "val_graphs": val,
@@ -407,7 +435,7 @@ def load_audit_raw_rows(language, trial_samples=None, limit=None, seed=SEED):
     }
 
 
-def build_adv_only(language, trial_samples=None, limit=None, seed=SEED):
+def build_adv_only(language, trial_samples=None, limit=None, seed=SEED, semantic=None):
     """Build ONLY the adversarial pool + adv graphs, reusing a clean bundle.
 
     Requires `python main.py --language X` (same trial_samples/limit) to have
@@ -415,6 +443,7 @@ def build_adv_only(language, trial_samples=None, limit=None, seed=SEED):
     untouched, so clean outputs stay bit-identical and adv outputs match the
     full-build path exactly. Only `train_adv_data` is parsed here.
     Data rows stay locked at SEED; `seed` only drives augmentation sampling.
+    `semantic` mirrors prepare_graphs (None = follow the process-wide switch).
     """
     from augment import generate_adversarial_augmentations
     seed_everything(seed)
@@ -436,7 +465,7 @@ def build_adv_only(language, trial_samples=None, limit=None, seed=SEED):
 
     train_adv_data = generate_adversarial_augmentations(train_clean_data, language, parser)
     _, d_adv, _, _ = SPLIT_DESC[language]
-    train_adv_graphs = process_split(train_adv_data, d_adv, ctx)
+    train_adv_graphs = process_split(train_adv_data, d_adv, ctx, semantic=semantic)
     apply_normalization(train_adv_graphs, ctx)
 
     bundle["train_adv_graphs"] = train_adv_graphs

@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 
 from language_configs import CLEAN_CHECKPOINT, ADV_CHECKPOINT
+from model import checkpoint_threshold
 from train import train_model
 from evaluate import evaluate_model
 from attack_evaluation import run_attack_benchmark
@@ -76,7 +77,7 @@ def _scenario_name(suite):
 
 
 def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
-                 threshold=0.50, base_seed=42, skip_external=False,
+                 threshold=None, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
                  rebuild_cache=False):
     variant = "adv" if adversarial else "clean"
@@ -141,15 +142,21 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
         # I restore the per-seed checkpoint before every eval step because
         # all eval CLIs load the canonical filename.
         shutil.copyfile(seed_ckpt, ckpt_canon)
+        # One val-calibrated threshold per seed: read the value train.py
+        # stored, so clean/attack/external evals all use the same cut and
+        # the 5-seed spread reflects model variance, not threshold drift.
+        seed_threshold = threshold if threshold is not None else checkpoint_threshold(ckpt_canon)
+        print(f"[i] Seed {seed} decision threshold: {seed_threshold:.4f}"
+              + (" (checkpoint-calibrated)" if threshold is None else " (forced via --threshold)"))
         res = evaluate_model(language=language, batch_size=batch_size,
-                             adversarial=adversarial, threshold=threshold,
+                             adversarial=adversarial, threshold=seed_threshold,
                              seed=seed)
         _row("Clean Test", res)
         del res
 
         shutil.copyfile(seed_ckpt, ckpt_canon)
         df = run_attack_benchmark(language=language, batch_size=batch_size,
-                                  threshold=threshold, base_seed=base_seed,
+                                  threshold=seed_threshold, base_seed=base_seed,
                                   adversarial=adversarial,
                                   graphs_cache_dir=graphs_cache_dir,
                                   rebuild_cache=rebuild_cache)
@@ -172,14 +179,14 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                     fn = {"python": ext.run_external_semeval_python,
                           "java": ext.run_external_semeval_java,
                           "cpp": ext.run_external_semeval_cpp}[language]
-                    out = fn(bundle, subtask, multi, batch_size, threshold, variant,
+                    out = fn(bundle, subtask, multi, batch_size, seed_threshold, variant,
                              graphs_cache_dir, rebuild_cache)
                 elif suite == "hmcorp":
                     fn = ext.evaluate_hmcorp_python if language == "python" else ext.evaluate_hmcorp_java
-                    out = fn(bundle, batch_size, threshold, variant,
+                    out = fn(bundle, batch_size, seed_threshold, variant,
                              graphs_cache_dir, rebuild_cache)
                 else:
-                    out = ext.evaluate_gptsniffer(bundle, batch_size, threshold, variant,
+                    out = ext.evaluate_gptsniffer(bundle, batch_size, seed_threshold, variant,
                                                   graphs_cache_dir, rebuild_cache)
                 res = (out or {}).get(variant)
                 _row(_scenario_name(suite), res)
@@ -230,7 +237,9 @@ if __name__ == "__main__":
                         help="Run the adversarial variant instead of clean (default: clean)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision threshold for every eval step (default: each seed's "
+                             "checkpoint-calibrated value from training)")
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--skip-external", action="store_true")

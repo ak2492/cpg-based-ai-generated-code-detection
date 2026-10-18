@@ -16,11 +16,13 @@ import argparse
 from pipeline import prepare_graphs, save_bundle, build_adv_only
 
 
-def run_extraction(language="python", trial_samples=None, limit=None, adversarial=False, seed=42):
+def run_extraction(language="python", trial_samples=None, limit=None, adversarial=False, seed=42,
+                   semantic=True):
     if adversarial:
-        return build_adv_only(language, trial_samples=trial_samples, limit=limit, seed=seed)
+        return build_adv_only(language, trial_samples=trial_samples, limit=limit, seed=seed,
+                              semantic=semantic)
     bundle = prepare_graphs(language, trial_samples=trial_samples, limit=limit,
-                            adversarial=False, seed=seed)
+                            adversarial=False, seed=seed, semantic=semantic)
     path = save_bundle(bundle, trial_samples=trial_samples, limit=limit)
     n_clean = len(bundle["train_clean_graphs"])
     print(f"Extraction complete: clean={n_clean} "
@@ -39,7 +41,12 @@ if __name__ == "__main__":
                         help="Cap balanced splits for quick debugging (None = notebook exact)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed (model init/shuffle/dropout); data splits stay locked for comparability")
+    parser.add_argument("--no-semantic", action="store_true",
+                        help="Skip the CodeT5+ semantic branch (768-d CLS embedding per sample). "
+                             "Default is ON: the base paper's ablation shows semantic features carry "
+                             "most of the detection signal, so every downstream model depends on them.")
     args = parser.parse_args()
 
     run_extraction(language=args.language, trial_samples=args.trial_samples,
-                   limit=args.limit, adversarial=args.adversarial, seed=args.seed)
+                   limit=args.limit, adversarial=args.adversarial, seed=args.seed,
+                   semantic=not args.no_semantic)

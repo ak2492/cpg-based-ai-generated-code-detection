@@ -19,7 +19,7 @@ import torch
 from torch_geometric.loader import DataLoader
 
 from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import build_encoder_from_checkpoint
+from model import build_encoder_from_checkpoint, checkpoint_threshold
 from attack_utils import (
     ATTACK_SUITES,
     attack_graph_cache_path,
@@ -54,18 +54,22 @@ def _model_tag(language, adversarial):
     return "Model 1 (Clean Baseline)"
 
 
-def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
+def run_attack_benchmark(language="python", batch_size=None, threshold=None,
                          base_seed=42, adversarial=False, target="machine",
                          graphs_cache_dir=None, rebuild_cache=False):
     """Paper Sec 4.7 benchmark: machine-only by default (target='machine').
 
     graphs_cache_dir enables the parse-once .pt cache (None = parse every
     call, exactly like before); rebuild_cache forces re-parsing.
+    threshold=None uses the checkpoint's val-calibrated cut.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
+    if threshold is None:
+        threshold = checkpoint_threshold((ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
+        print(f"[i] Decision threshold from checkpoint: {threshold:.4f}")
 
     bundle = load_bundle(language)
     ctx = bundle["ctx"]
@@ -133,18 +137,22 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
 
 
 def run_single_attack(language="python", attack_type="auth", mode="enhanced", batch_size=None,
-                      threshold=0.50, base_seed=42,
+                      threshold=None, base_seed=42,
                       target="machine", adversarial=False):
     """Single-layer evaluation of exactly one model.
 
     Paper Sec 4.7 protocol: machine-only by default (target='machine');
     target='all' attacks every sample. BASIC mode is paper-identical
     (most difficult); graphs are rebuilt from the single-transform code.
+    threshold=None uses the checkpoint's val-calibrated cut.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
+    if threshold is None:
+        threshold = checkpoint_threshold((ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
+        print(f"[i] Decision threshold from checkpoint: {threshold:.4f}")
 
     bundle = load_bundle(language)
     ctx = bundle["ctx"]
@@ -172,7 +180,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision threshold (default: checkpoint's val-calibrated value)")
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--adversarial", action="store_true",
                         help="Benchmark the adversarially trained checkpoint instead of clean")

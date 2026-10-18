@@ -31,6 +31,9 @@ class GatedGNNLayer(nn.Module):
 # these values; keep both in sync. struct_dim (28-d features) and
 # num_relations (16 edge types), and global_dim (37-d macro stats) stay locked —
 # they are dictated by the graph data, and any other value fails forward.
+# semantic_dim defaults to 0 so pre-semantic checkpoints rebuild byte-identically;
+# train_single_model probes the bundle and stores the real width (768) in the
+# checkpoint, so eval always reconstructs the trained architecture.
 HPARAM_DEFAULTS = {
     'type_dim': 64, 'subword_dim': 128, 'hidden_dim': 256,
     'num_layers': 4, 'dropout_gnn': 0.15,
@@ -38,23 +41,25 @@ HPARAM_DEFAULTS = {
     'cls_hidden1': 256, 'cls_hidden2': 64,
     'dropout_cls1': 0.3, 'dropout_cls2': 0.2,
     'mask_rate': 0.15,
+    'semantic_dim': 0, 'sem_hidden': 256, 'sem_dropout': 0.2,
 }
 
 
 # Ablation configs for the paper study. Each id isolates exactly one
 # architectural decision against `full` (plus the `no-mp` floor). I run all
-# ten on each language, seed 42, clean training only, test-set eval only.
+# eleven on each language, seed 42, clean training only, test-set eval only.
 ABLATION_IDS = (
-    "full",        # 0 reference upper bound
-    "no-mp",       # 1 floor: 0 RGCN layers, projected features only
-    "no-subword",  # 2 drop identifier/token-content branch
-    "no-struct",   # 3 drop hand-engineered per-node stylometry
-    "syntax-only", # 4 keep edge types {0,1,2,3,8}; drop data-flow/CFG/call/next-token
-    "no-gate",     # 5 plain residual x+h instead of learned gate
-    "no-jk",       # 6 last-layer readout instead of multi-scale fusion
-    "no-virtual",  # 7 drop global supernode; pooled AST nodes only
-    "mean-pool",   # 8 mean pooling instead of learned attention pooling
-    "no-film",     # 9 no file-level macro-stat modulation
+    "full",         # 0 reference upper bound
+    "no-mp",        # 1 floor: 0 RGCN layers, projected features only
+    "no-subword",   # 2 drop identifier/token-content branch
+    "no-struct",    # 3 drop hand-engineered per-node stylometry
+    "syntax-only",  # 4 keep edge types {0,1,2,3,8}; drop data-flow/CFG/call/next-token
+    "no-gate",      # 5 plain residual x+h instead of learned gate
+    "no-jk",        # 6 last-layer readout instead of multi-scale fusion
+    "no-virtual",   # 7 drop global supernode; pooled AST nodes only
+    "mean-pool",    # 8 mean pooling instead of learned attention pooling
+    "no-film",      # 9 no file-level macro-stat modulation
+    "no-semantic",  # 10 drop the CodeT5+ semantic branch (needs a semantic bundle)
 )
 
 # Edge types kept by the syntax-only graph variant (parent<->child,
@@ -127,7 +132,7 @@ class AdvancedASTGraphEncoder(nn.Module):
     def __init__(self, num_node_types, bpe_vocab_size, type_dim=64, struct_dim=28, subword_dim=128, hidden_dim=256, num_relations=16, pad_idx=0, global_dim=37,
                  num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                  cls_hidden1=256, cls_hidden2=64, dropout_cls1=0.3, dropout_cls2=0.2,
-                 mask_rate=0.15, ablation="full"):
+                 mask_rate=0.15, ablation="full", semantic_dim=0, sem_hidden=256, sem_dropout=0.2):
         super().__init__()
         parts = set(parse_ablation(ablation))
         self.ablation = canonical_ablation(ablation)
@@ -140,6 +145,10 @@ class AdvancedASTGraphEncoder(nn.Module):
         self.use_virtual = "no-virtual" not in parts
         self.use_attn_pool = "mean-pool" not in parts
         self.use_film = "no-film" not in parts
+        # Semantic branch: only when the bundle actually carries CodeT5+
+        # embeddings AND the config keeps them. semantic_dim=0 keeps every
+        # pre-semantic checkpoint rebuilding exactly as before.
+        self.use_semantic = semantic_dim > 0 and "no-semantic" not in parts
         # I keep the full 4-layer stack for every config except the floor:
         # no-mp zeroes it (JK/virtual become vacuous by construction there).
         eff_layers = 0 if "no-mp" in parts else num_layers
@@ -175,7 +184,16 @@ class AdvancedASTGraphEncoder(nn.Module):
             self.film_gate = nn.Sequential(nn.Linear(global_dim, film_hidden), nn.LayerNorm(film_hidden), nn.GELU(), nn.Linear(film_hidden, graph_dim))
         else:
             self.film_gate = None
-        self.classifier = nn.Sequential(nn.Linear(graph_dim, cls_hidden1), nn.LayerNorm(cls_hidden1), nn.GELU(), nn.Dropout(dropout_cls1), nn.Linear(cls_hidden1, cls_hidden2), nn.GELU(), nn.Dropout(dropout_cls2), nn.Linear(cls_hidden2, 1))
+        # Semantic fusion (hybrid-style late concat): the 768-d CodeT5+ CLS
+        # vector is projected to sem_hidden and concatenated with the pooled
+        # graph embedding right before the classifier, so the GNN never has
+        # to carry token semantics through message passing.
+        if self.use_semantic:
+            self.sem_proj = nn.Sequential(nn.Linear(semantic_dim, sem_hidden), nn.LayerNorm(sem_hidden), nn.GELU(), nn.Dropout(sem_dropout))
+        else:
+            self.sem_proj = None
+        cls_in = graph_dim + (sem_hidden if self.use_semantic else 0)
+        self.classifier = nn.Sequential(nn.Linear(cls_in, cls_hidden1), nn.LayerNorm(cls_hidden1), nn.GELU(), nn.Dropout(dropout_cls1), nn.Linear(cls_hidden1, cls_hidden2), nn.GELU(), nn.Dropout(dropout_cls2), nn.Linear(cls_hidden2, 1))
 
     def forward(self, data, enable_token_masking=False):
         edge_index, edge_type = data.edge_index, data.edge_attr
@@ -242,6 +260,20 @@ class AdvancedASTGraphEncoder(nn.Module):
             graph_emb = torch.cat([pooled, global_max_pool(h_jk_ast, batch_ast)], dim=-1)
         if self.use_film:
             graph_emb = graph_emb * torch.sigmoid(self.film_gate(data.global_stats))
+        if self.use_semantic:
+            sem = getattr(data, "sem", None)
+            if sem is None:
+                raise ValueError(
+                    "This model was trained with the CodeT5+ semantic branch but the batch "
+                    "has no `sem` field. Rebuild graphs with semantic features (the default: "
+                    "plain `python main.py --language X`), or retrain with `--semantic_dim 0`.")
+            # Graphs store sem as [1, 768] (PyG convention), so a batch is
+            # [B, 768]; a lone un-batched Data stays [1, 768]. Flattening a
+            # [B*768] vector again would silently mix samples, so guard it.
+            if sem.dim() != 2 or sem.size(-1) != int(self.sem_proj[0].in_features):
+                raise ValueError(
+                    f"Unexpected `sem` shape {tuple(sem.shape)}; expected [B, {int(self.sem_proj[0].in_features)}].")
+            graph_emb = torch.cat([graph_emb, self.sem_proj(sem)], dim=-1)
         return self.classifier(graph_emb).view(-1)
 
 
@@ -334,6 +366,23 @@ def checkpoint_ablation(filepath, device="cpu"):
     return canonical_ablation(ablation)
 
 
+def checkpoint_threshold(filepath, device="cpu", default=0.50):
+    """Read the validation-calibrated decision threshold stored in a checkpoint.
+
+    train_single_model picks the threshold that maximizes F1 on the val
+    split after restoring the best weights, so eval can stop guessing 0.50.
+    Old checkpoints (pre-calibration) fall back to `default`.
+    """
+    try:
+        ckpt = torch.load(filepath, map_location=device, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(filepath, map_location=device)
+    try:
+        return float(ckpt.get('optimal_threshold', default))
+    except (TypeError, ValueError):
+        return default
+
+
 def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation="full"):
     """Rebuild the encoder for eval: checkpoint hyperparams win, else notebook defaults."""
     from language_configs import BPE_VOCAB_SIZE
@@ -350,6 +399,9 @@ def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation
         cls_hidden1=hp['cls_hidden1'], cls_hidden2=hp['cls_hidden2'],
         dropout_cls1=hp['dropout_cls1'], dropout_cls2=hp['dropout_cls2'],
         mask_rate=hp['mask_rate'], ablation=ablation,
+        semantic_dim=int(hp.get('semantic_dim', 0)),
+        sem_hidden=int(hp.get('sem_hidden', 256)),
+        sem_dropout=float(hp.get('sem_dropout', 0.2)),
     ).to(device)
     return model, hp
 
