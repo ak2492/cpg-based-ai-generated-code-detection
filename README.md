@@ -17,11 +17,15 @@ bundle-build time and stored on each graph as `.sem`, so training, attacks,
 and external suites all reuse it; the classifier consumes
 `[graph_emb ‖ sem_proj(sem)]`.
 
-Decision thresholds are calibrated, not guessed: `train.py` picks the
-validation-F1-optimal cut after restoring the best weights and stores it in
-the checkpoint as `optimal_threshold`; `evaluate.py`, the attack suites, the
-external suites, and `run_five_seeds.py` all resolve that value instead of
-hardcoding 0.50 (pass `--threshold` to force a specific cut).
+Decision thresholds are calibrated, not guessed: `train.py` picks the cut
+after restoring the best weights — the val-F1 argmax of the val ROC
+reweighted to the evaluation split's class prevalence (val is balanced by
+construction; e.g. the Java test set is 69% machine) — and the calibrated
+RULE must first beat the fixed 0.50 cut on held-out val folds before it is
+adopted. The result is stored in the checkpoint as `optimal_threshold`;
+`evaluate.py`, the attack suites, the external suites, and
+`run_five_seeds.py` all resolve that value instead of hardcoding 0.50
+(pass `--threshold` to force a specific cut).
 
 ---
 
@@ -119,8 +123,9 @@ Hyperparameter flags (`train.py`; omit any flag for the notebook default):
 - Training: `--lr` 5e-4, `--weight_decay` 1e-3, `--epochs` 45,
   `--patience` 10, `--accum_steps` 2, `--tmax` 45, `--eta_min` 1e-6,
   `--smooth_pos` 0.975, `--smooth_neg` 0.025, `--grad_clip` 1.0,
-  `--threshold` fallback-only (checkpoints always store the val-calibrated
-  value), `--batch_size` per-language default
+  `--threshold` fallback-only (checkpoints always store the calibrated
+  threshold; the fallback itself is the cut the calibration must beat on
+  held-out val folds), `--batch_size` per-language default
 - Locked (no flag; changing them breaks graph/checkpoint compat):
   `struct_dim=28`, `num_relations=16`, `global_dim=37` (37-d macro stats),
   conv kernel 3, BPE/subword sizes,
