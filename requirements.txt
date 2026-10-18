@@ -8,15 +8,19 @@ tree-sitter
 tree-sitter-python
 tree-sitter-java
 tree-sitter-cpp
-datasets
 scikit-learn
 tqdm
-tokenizers
 pandas
 numpy
-huggingface_hub
 scipy
 psutil
-transformers  # CodeT5+ semantic branch (Salesforce/codet5p-220m)
-sentencepiece  # CodeT5+ tokenizer (T5 sentencepiece)
+# CodeT5+ semantic branch stack — pinned to the exact versions the hybrid
+# implementation (AI_Generated_Hybrid_Code_Detection) ran on Kaggle. Newer
+# transformers releases reject this model repo's legacy tokenizer config
+# (100 `additional_special_tokens` dict entries in special_tokens_map.json).
+transformers==4.40.0
+tokenizers==0.19.1
+huggingface_hub==0.23.0
+datasets==2.19.1
+sentencepiece  # sentencepiece tokenizers generally; codet5p-220m itself ships RoBERTa BPE files
 optuna  # bayes_search.py only (Bayesian TPE grid search)

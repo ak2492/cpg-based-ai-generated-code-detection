@@ -50,7 +50,22 @@ class SemanticExtractor:
     def __init__(self, device=None, model_name=MODEL_NAME, batch_size=64):
         from transformers import AutoTokenizer, T5EncoderModel
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        except Exception as exc:  # noqa: BLE001 - version-specific tokenizer bugs
+            # Some transformers releases reject this repo's legacy
+            # tokenizer_config (special_tokens_map.json lists 100
+            # `additional_special_tokens` as dicts). Loading the RoBERTa BPE
+            # files directly yields identical ids (<s> CLS, same vocab); see
+            # requirements.txt for the pinned, proven-good version.
+            from transformers import RobertaTokenizer
+            from huggingface_hub import hf_hub_download
+            vocab = hf_hub_download(model_name, "vocab.json")
+            merges = hf_hub_download(model_name, "merges.txt")
+            self.tokenizer = RobertaTokenizer(vocab_file=vocab, merges_file=merges,
+                                              errors="replace")
+            print(f"[i] AutoTokenizer failed ({type(exc).__name__}: {exc}); "
+                  f"loaded the RoBERTa BPE files directly instead.")
         self.model = T5EncoderModel.from_pretrained(model_name).to(self.device).eval()
         self.batch_size = batch_size
 
