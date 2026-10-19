@@ -91,10 +91,12 @@ def _read_rows(path):
 
 
 def _write_rows(path, fields, rows):
-    with open(path, "w", newline="", encoding="utf-8") as fh:
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+    os.replace(tmp, path)
 
 
 def _merge_rows(path, fields, rows, key_fields, sort_key):
