@@ -95,11 +95,18 @@ def parse_ablation(ablation):
         raise ValueError(f"Duplicate component in ablation '{ablation}'.")
     if "full" in parts and len(parts) > 1:
         raise ValueError(f"'full' cannot be combined: '{ablation}'.")
-    if "no-mp" in parts and len(parts) > 1:
-        # I reject these because the floor already zeroes the layer stack:
-        # no-mp+no-jk (or +no-gate/...) is just no-mp wearing a disguise,
-        # and running it would spend a full training on a duplicate.
-        raise ValueError(f"'no-mp' cannot be combined: '{ablation}' is identical to 'no-mp'.")
+    if "no-mp" in parts:
+        # no-mp zeroes the layer stack, so the gate (used only inside layers)
+        # and 'no-jk' (readout choice when layers exist) would change nothing;
+        # a combo carrying either is an exact duplicate of the same combo
+        # without them, so I keep rejecting exactly those. Every other
+        # combination is meaningful: the lightweight study shrinks the floor
+        # further (e.g. no-mp + no-subword + no-struct + mean-pool + no-film).
+        inert = [p for p in ("no-jk", "no-gate") if p in parts]
+        if inert:
+            raise ValueError(
+                f"'no-mp' builds zero message-passing layers, so {inert} would be inert: "
+                f"'{ablation}' is identical to the same combo without them.")
     return tuple(p for p in ABLATION_IDS if p in parts)
 
 

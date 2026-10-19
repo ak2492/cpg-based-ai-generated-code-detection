@@ -14,6 +14,7 @@ import sys
 import math
 import gzip
 import re
+import time
 from collections import Counter
 
 import numpy as np
@@ -782,13 +783,22 @@ def process_split(split, desc, ctx, semantic=None):
         semantic = semantic_enabled()
     out = []
     texts = []
-    for item in tqdm(split, desc=desc):
+    t0 = time.perf_counter()
+    for i, item in enumerate(tqdm(split, desc=desc), start=1):
         code = item.get('text', item.get('code', ''))
         g = build_optimized_ast_graph(code, item.get('label', item.get('target', 0)), ctx)
         if g is not None:
             out.append(g)
             if semantic:
                 texts.append(code)
+        # Heartbeat so long remote builds (Kaggle/A100) stream visible
+        # progress even when tqdm's \r updates are swallowed by the log.
+        if i % 2000 == 0:
+            elapsed = time.perf_counter() - t0
+            rate = i / max(1e-9, elapsed)
+            eta_min = (len(split) - i) / max(1e-9, rate) / 60.0
+            print(f"[{desc}] {i}/{len(split)} rows | {rate:.1f} rows/s | "
+                  f"elapsed {elapsed / 60:.1f} min | ETA {eta_min:.1f} min", flush=True)
     if semantic and out:
         from semantic_features import embed_graphs
         embed_graphs(out, texts)

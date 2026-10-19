@@ -186,6 +186,8 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
         'mask_rate': mask_rate,
         'semantic_dim': semantic_dim, 'sem_hidden': sem_hidden, 'sem_dropout': sem_dropout,
     }
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[i] Trainable parameters: {n_params:,} ({n_params / 1e6:.3f}M)", flush=True)
 
     num_pos = sum(1 for g in train_graphs if g.y.item() == 1.0)
     class_weight = torch.tensor([(len(train_graphs) - num_pos) / max(1.0, float(num_pos))]).to(device)
