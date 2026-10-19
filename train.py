@@ -151,7 +151,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        cls_hidden1=256, cls_hidden2=64,
                        dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
                        semantic_dim=None, sem_hidden=256, sem_dropout=0.2,
-                       test_graphs=None, test_every=5):
+                       test_graphs=None, test_every=5, epoch_probe=None):
     ablation = canonical_ablation(ablation)
     if adversarial and ablation != "full":
         raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
@@ -249,6 +249,17 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
 
         ep_duration = time.perf_counter() - ep_start
         print(f"Epoch {epoch+1:02d}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Val ROC: {cur_roc:.4f} | Val F1: {cur_f1:.4f} | Time: {ep_duration:.1f}s")
+
+        # Optional read-only probe (diagnostics only): receives the CURRENT
+        # epoch's weights and validation scores. It never influences gradients,
+        # the scheduler, checkpoint selection or early stopping; studies use it
+        # to log full-test metrics per epoch without touching the training path.
+        if epoch_probe is not None:
+            epoch_probe(epoch=epoch, epochs=epochs, model=model,
+                        train_loss=total_loss / len(train_loader),
+                        val_f1=cur_f1, val_roc=cur_roc,
+                        val_probs=val_probs, val_labels=val_labels,
+                        epoch_seconds=ep_duration)
 
         if cur_f1 > best_f1:
             best_f1 = cur_f1
