@@ -24,10 +24,14 @@ batch size per language, patience = epochs so nothing early-stops).
 
 Outputs (in the repo working directory):
   epoch_probe_<lang>.csv                     one row per (rung, seed, epoch)
+  epoch_probe_<lang>_live.csv                current model's rows, rewritten each epoch
   epoch_probe_<lang>_summary.csv             one row per (rung, seed, candidate)
   probe_<lang>_<rung>_s<seed>_bestvalf1.pth  copy of the standard checkpoint
   probe_<lang>_<rung>_s<seed>_bestvalroc.pth raw state dict (diagnostic)
   probe_<lang>_<rung>_s<seed>_final.pth      raw state dict (diagnostic)
+
+The console line per epoch prints test accuracy, precision, recall, F1, ROC and
+the val-calibrated-threshold F1; the CSV carries the same numbers (plus FPR).
 
 Reruns merge by (rung, seed, epoch); `--resume` skips models whose per-epoch
 rows already reach the requested epoch count.
@@ -38,8 +42,10 @@ Usage:
   python -u run_epoch_probe.py --language java --rungs L2_subword --seeds 42,43 --resume
 """
 import argparse
+import contextlib
 import csv
 import gc
+import io
 import os
 import shutil
 import time
@@ -156,6 +162,12 @@ def _snapshot(model):
     return {k: v.detach().clone() for k, v in model.state_dict().items()}
 
 
+def _quiet_select(probs, labels, prior):
+    """Same val-calibrated rule, without its per-call diagnostic print."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _select_threshold(probs, labels, fallback=0.50, prior=prior)
+
+
 def _rounded(value, ndigits=6):
     return round(float(value), ndigits)
 
@@ -224,6 +236,8 @@ def main():
                         help="Per-epoch CSV (default: epoch_probe_<language>.csv)")
     parser.add_argument("--summary-out", default=None,
                         help="Candidate-summary CSV (default: epoch_probe_<language>_summary.csv)")
+    parser.add_argument("--live-out", default=None,
+                        help="Current model's per-epoch CSV (default: epoch_probe_<language>_live.csv)")
     parser.add_argument("--resume", action="store_true",
                         help="Skip (rung, seed) models already complete for this epoch budget")
     args = parser.parse_args()
@@ -238,6 +252,7 @@ def main():
     lang = args.language
     out_path = args.out or ("epoch_probe_%s.csv" % lang)
     summary_path = args.summary_out or ("epoch_probe_%s_summary.csv" % lang)
+    live_path = args.live_out or ("epoch_probe_%s_live.csv" % lang)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = args.batch_size or DEFAULT_BATCH_SIZE[lang]
 
@@ -245,6 +260,7 @@ def main():
           % (lang, seeds, args.epochs, batch_size, device), flush=True)
     print("[i] Selection rules compared: best val F1 / best val ROC / final epoch "
           "(+ oracle test upper bounds, diagnostic only)", flush=True)
+    print("[i] Live CSV (current model, rewritten each epoch): %s" % live_path, flush=True)
     for name, ablation, layers, desc in rungs:
         print("    - %-10s ablation=%-45s layers=%d  %s"
               % (name, canonical_ablation(ablation), layers, desc), flush=True)
@@ -281,6 +297,7 @@ def main():
                   % (name, canonical_ablation(ablation), layers, seed, args.epochs))
             print("       %s" % desc)
             print("=" * 100, flush=True)
+            _write_rows(live_path, EPOCH_FIELDS, [])  # header only; rewritten each epoch
 
             gc.collect()
             if torch.cuda.is_available():
@@ -302,16 +319,18 @@ def main():
                 test_probs, test_labels = _probs(model, test_loader, device)
                 test_roc = _auc(test_probs, test_labels)
                 m50 = _metrics_at(test_probs, test_labels, 0.50)
-                val_thr = _select_threshold(np.asarray(val_probs), np.asarray(val_labels),
-                                            fallback=0.50, prior=eval_prior)
+                val_thr = _quiet_select(np.asarray(val_probs), np.asarray(val_labels),
+                                        eval_prior)
                 mthr = _metrics_at(test_probs, test_labels, val_thr)
                 state["rows"].append(_epoch_row(
                     lang, name, seed, epoch + 1, epochs, ablation, layers,
                     state["params"], train_loss, val_f1, val_roc, val_thr,
                     m50, test_roc, mthr, epoch_seconds))
-                print("    [probe %02d] test@0.50 F1 %.4f ROC %.4f | "
-                      "test@thr(%.3f) F1 %.4f"
-                      % (epoch + 1, m50["f1"], test_roc, val_thr, mthr["f1"]),
+                _write_rows(live_path, EPOCH_FIELDS, state["rows"])
+                print("    [probe %02d] test acc %.4f | P %.4f R %.4f F1 %.4f | "
+                      "ROC %.4f | thr %.3f F1 %.4f"
+                      % (epoch + 1, m50["acc"], m50["prec"], m50["rec"], m50["f1"],
+                         test_roc, val_thr, mthr["f1"]),
                       flush=True)
                 if val_f1 > state["best_f1"]:
                     state["best_f1"] = float(val_f1)
@@ -342,8 +361,7 @@ def main():
                     continue
                 model.load_state_dict(cand_state)
                 val_probs, val_labels = _probs(model, val_loader, device)
-                val_thr = _select_threshold(val_probs, val_labels,
-                                            fallback=0.50, prior=eval_prior)
+                val_thr = _quiet_select(val_probs, val_labels, eval_prior)
                 test_probs, test_labels = _probs(model, test_loader, device)
                 test_roc = _auc(test_probs, test_labels)
                 m50 = _metrics_at(test_probs, test_labels, 0.50)
@@ -405,24 +423,24 @@ def main():
             orc = _cand("oracle_test_f1")
             print("\n[i] %s seed %d | params=%s | train %.1f min"
                   % (name, seed, "{:,}".format(params), train_min), flush=True)
-            print("[i]   best val F1  ep %-3s  test F1 %.4f  ROC %.4f  (strict @0.50)"
-                  % (bf1["epoch"], bf1["test_f1"], bf1["test_roc"]), flush=True)
-            print("[i]   best val ROC ep %-3s  test F1 %.4f  ROC %.4f"
-                  % (broc["epoch"], broc["test_f1"], broc["test_roc"]), flush=True)
-            print("[i]   final epoch  ep %-3s  test F1 %.4f  ROC %.4f"
-                  % (fin["epoch"], fin["test_f1"], fin["test_roc"]), flush=True)
-            print("[i]   oracle (diagnostic) ep %-3s  test F1 %.4f  ROC %.4f"
-                  % (orc["epoch"], orc["test_f1"], orc["test_roc"]), flush=True)
-            print("[i] %s updated (%d epoch rows); summary: %s"
-                  % (out_path, len(rows), summary_path), flush=True)
+            print("[i]   best val F1  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f  (strict @0.50)"
+                  % (bf1["epoch"], bf1["test_acc"], bf1["test_f1"], bf1["test_roc"]), flush=True)
+            print("[i]   best val ROC ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
+                  % (broc["epoch"], broc["test_acc"], broc["test_f1"], broc["test_roc"]), flush=True)
+            print("[i]   final epoch  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
+                  % (fin["epoch"], fin["test_acc"], fin["test_f1"], fin["test_roc"]), flush=True)
+            print("[i]   oracle (diagnostic) ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
+                  % (orc["epoch"], orc["test_acc"], orc["test_f1"], orc["test_roc"]), flush=True)
+            print("[i] %s updated (%d epoch rows); live: %s; summary: %s"
+                  % (out_path, len(rows), live_path, summary_path), flush=True)
 
             del model
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    print("\n[i] DONE. Per-epoch rows: %s | candidate summary: %s"
-          % (out_path, summary_path), flush=True)
+    print("\n[i] DONE. Per-epoch rows: %s | live: %s | candidate summary: %s"
+          % (out_path, live_path, summary_path), flush=True)
 
 
 if __name__ == "__main__":
