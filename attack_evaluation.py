@@ -31,6 +31,7 @@ from attack_utils import (
 )
 from graph_builder import process_split, apply_normalization
 from pipeline import load_bundle, load_test_raw_rows
+from threshold import calibrate_threshold, test_prior
 
 
 def _load_model(ctx, device, language, adversarial=False):
@@ -54,13 +55,15 @@ def _model_tag(language, adversarial):
     return "Model 1 (Clean Baseline)"
 
 
-def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
+def run_attack_benchmark(language="python", batch_size=None, threshold=None,
                          base_seed=42, adversarial=False, target="machine",
                          graphs_cache_dir=None, rebuild_cache=False):
     """Paper Sec 4.7 benchmark: machine-only by default (target='machine').
 
     graphs_cache_dir enables the parse-once .pt cache (None = parse every
     call, exactly like before); rebuild_cache forces re-parsing.
+    threshold=None derives the clean-validation calibrated cut at eval time,
+    matching the CPG/hybrid five-seed tables.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -72,6 +75,19 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
     test_graphs = bundle["test_graphs"]
     test_raw = load_test_raw_rows(language)
     parser = bundle["parser"]
+    ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
+    if threshold is None:
+        # Legacy checkpoints store 0.50, not a calibrated cut; derive it from
+        # clean validation with the same rule the other two repos use.
+        threshold = calibrate_threshold(bundle, ckpt_file, adversarial=adversarial,
+                                        fallback=0.50,
+                                        prior=test_prior(language, bundle=bundle),
+                                        batch_size=batch_size, device=device)
+        print(f"[i] Val-calibrated decision threshold: {threshold:.4f}")
+        # Calibration builds a model (consuming RNG). Reset to the fixed
+        # attack-sampling state so the attacked sets stay bit-identical to a
+        # run that was handed an explicit threshold.
+        set_seed(base_seed)
 
     model = _load_model(ctx, device, language, adversarial=adversarial)
     tag = _model_tag(language, adversarial)
@@ -133,13 +149,14 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=0.50,
 
 
 def run_single_attack(language="python", attack_type="auth", mode="enhanced", batch_size=None,
-                      threshold=0.50, base_seed=42,
+                      threshold=None, base_seed=42,
                       target="machine", adversarial=False):
     """Single-layer evaluation of exactly one model.
 
     Paper Sec 4.7 protocol: machine-only by default (target='machine');
     target='all' attacks every sample. BASIC mode is paper-identical
     (most difficult); graphs are rebuilt from the single-transform code.
+    threshold=None derives the clean-validation calibrated cut at eval time.
     """
     set_seed(base_seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -151,6 +168,15 @@ def run_single_attack(language="python", attack_type="auth", mode="enhanced", ba
     test_graphs = bundle["test_graphs"]
     test_raw = load_test_raw_rows(language)
     parser = bundle["parser"]
+    ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
+    if threshold is None:
+        threshold = calibrate_threshold(bundle, ckpt_file, adversarial=adversarial,
+                                        fallback=0.50,
+                                        prior=test_prior(language, bundle=bundle),
+                                        batch_size=batch_size, device=device)
+        print(f"[i] Val-calibrated decision threshold: {threshold:.4f}")
+        # Keep the attacked set identical to an explicit-threshold run.
+        set_seed(base_seed)
 
     model = _load_model(ctx, device, language, adversarial=adversarial)
 
@@ -172,7 +198,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", type=str, default="python", choices=["python", "java", "cpp"])
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Decision threshold (default: clean-validation calibrated, "
+                             "matching the CPG/hybrid protocol)")
     parser.add_argument("--base_seed", type=int, default=42)
     parser.add_argument("--adversarial", action="store_true",
                         help="Benchmark the adversarially trained checkpoint instead of clean")

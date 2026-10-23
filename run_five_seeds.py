@@ -9,12 +9,20 @@ Sequential usage (bundles first, once per language):
   python run_five_seeds.py --language python
   python run_five_seeds.py --language all --seeds 42-46 --adversarial
 
+Eval-only attack table from already-trained per-seed checkpoints:
+  python run_five_seeds.py --language all --stage attack \
+      --seeds 42-46 --threshold-mode calibrated
+
+Decision thresholds default to the clean-validation calibrated cut used by
+the CPG and hybrid five-seed tables; pass --threshold-mode fixed for 0.50.
+
 Per-seed checkpoints are copied to *_seed{s}.pth BEFORE the next seed
 overwrites the canonical file, and copied back before every eval step, so
 existing single-seed CLIs work unmodified.
 """
 import argparse
 import gc
+import glob
 import os
 import shutil
 import subprocess
@@ -28,12 +36,14 @@ from train import train_model
 from evaluate import evaluate_model
 from attack_evaluation import run_attack_benchmark
 from pipeline import load_bundle
+from threshold import compute_seed_threshold, test_prior
 import external_eval as ext
 
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
                "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
-COLUMNS = (["Language", "Variant", "Seed", "Scenario", "TrainValF1", "TrainValROC"]
+COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "ThresholdMode",
+            "TrainValF1", "TrainValROC"]
            + METRIC_COLS)
 
 
@@ -75,14 +85,81 @@ def _scenario_name(suite):
             "hmcorp": "Ext HMCorp", "gptsniffer": "Ext GPTSniffer"}.get(suite, suite)
 
 
+def purge_attack_cache(cache_dir, language):
+    """Delete this language's attack/external graph caches.
+
+    The cache key embeds the bundle mtime, but a cache written from a
+    different split can still be picked up when the bundle is rebuilt with a
+    similar timestamp. Purging once before a comparable run removes that
+    silent failure mode; later seeds still reuse the caches the first seed
+    writes (base_seed is fixed at 42).
+    """
+    if cache_dir is None:
+        return []
+    removed = []
+    for pattern in (f"{language}_graphs_*.pt", f"{language}_extgraphs_*.pt"):
+        for path in glob.glob(os.path.join(cache_dir, pattern)):
+            try:
+                os.remove(path)
+                removed.append(path)
+            except OSError as exc:
+                print(f"[!] Could not remove cache {path}: {exc}")
+    return removed
+
+
+def _resolve_threshold(language, adversarial, checkpoint, forced, mode,
+                       eval_prior, batch_size):
+    """Return the cut for one seed.
+
+    `forced` (--threshold) always wins. In calibrated mode the cut is derived
+    here from clean validation with the CPG rule, because legacy checkpoints
+    only store the fixed 0.50 passed to train.py. Fixed mode keeps 0.50.
+    """
+    if forced is not None:
+        return float(forced)
+    if mode == "calibrated":
+        return compute_seed_threshold(language, adversarial=adversarial,
+                                      checkpoint=checkpoint, fallback=0.50,
+                                      prior=eval_prior, batch_size=batch_size)
+    return 0.50
+
+
 def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
-                 threshold=0.50, base_seed=42, skip_external=False,
+                 threshold=None, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
-                 rebuild_cache=False):
+                 rebuild_cache=False, threshold_mode="calibrated",
+                 stage="full", target="machine", purge_cache=False):
+    """Run one language.
+
+    stage="full"  -> train (or reuse) each seed, then clean eval + attacks + external.
+    stage="attack" -> no training, no external: reload the archived per-seed
+                      checkpoints and run only the 9-suite attack benchmark.
+                      This is the eval-side stage that makes legacy rows
+                      directly comparable to the CPG/hybrid tables.
+    """
+    if threshold_mode not in ("fixed", "calibrated"):
+        raise ValueError(f"Unknown threshold_mode {threshold_mode!r}")
+    if stage not in ("full", "attack"):
+        raise ValueError(f"Unknown stage {stage!r}")
+
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     ckpt_canon, ckpt_tpl = _ckpt_files(language, adversarial)
     rows = []
+
+    if purge_cache:
+        removed = purge_attack_cache(graphs_cache_dir, language)
+        print(f"[i] Purged {len(removed)} attack/external graph cache file(s) "
+              f"for {language}.")
+
+    # The calibration prior is the clean test-set prevalence: one number per
+    # language, independent of the training seed. A forced --threshold does
+    # not need it, so skip the extra bundle load in that case.
+    eval_prior = (test_prior(language)
+                  if (threshold_mode == "calibrated" and threshold is None)
+                  else None)
+    if eval_prior is not None:
+        print(f"[i] Eval prior for {language}: {eval_prior:.4f}")
 
     prev_all = None
     if out_csv and resume and os.path.exists(out_csv):
@@ -90,6 +167,13 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
         prev = prev_all[(prev_all["Language"] != language) | (prev_all["Variant"] != variant)]
         rows.extend(prev.to_dict("records"))
         print(f"[resume] kept {len(prev)} existing rows for other configs.")
+    elif stage == "attack":
+        # Recover TrainValF1/ROC from the full five-seed table when it exists,
+        # so the attack CSV carries the same metadata columns as CPG/hybrid.
+        meta_path = f"five_seed_{language}_{variant}.csv"
+        if os.path.exists(meta_path):
+            prev_all = pd.read_csv(meta_path)
+            print(f"[attack] reusing TrainVal metadata from {meta_path}.")
 
     for seed in seeds:
         # I start each seed from a clean memory state because 5 seeds of
@@ -99,11 +183,32 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
         print("\n" + "=" * 85)
-        print(f"SEED {seed} [{language.upper()} {tag}]")
+        print(f"SEED {seed} [{language.upper()} {tag}] stage={stage}")
         print("=" * 85)
         seed_ckpt = ckpt_tpl.format(s=seed)
 
-        if resume and os.path.exists(seed_ckpt):
+        if stage == "attack":
+            # The attack stage consumes checkpoints only. It never trains and
+            # never falls back to the canonical file, because that file may
+            # belong to a different seed after an interrupted run.
+            if not os.path.exists(seed_ckpt):
+                raise FileNotFoundError(
+                    f"[attack] missing archived checkpoint {seed_ckpt}. "
+                    f"Run `python run_five_seeds.py --language {language} "
+                    f"--seeds {seed}` first (or restore the *_seed*.pth files).")
+            print(f"[attack] reusing {seed_ckpt}; training skipped.")
+            best_f1 = best_roc = float("nan")
+            if prev_all is not None:
+                hit = prev_all[(prev_all["Language"] == language)
+                               & (prev_all["Variant"] == variant)
+                               & (prev_all["Seed"] == seed)]
+                if len(hit):
+                    if "TrainValF1" in hit:
+                        best_f1 = float(hit["TrainValF1"].iloc[0])
+                    if "TrainValROC" in hit:
+                        best_roc = float(hit["TrainValROC"].iloc[0])
+            shutil.copyfile(seed_ckpt, ckpt_canon)
+        elif resume and os.path.exists(seed_ckpt):
             print(f"[resume] reusing existing {seed_ckpt}, skipping training.")
             best_f1 = best_roc = float("nan")
             if prev_all is not None:
@@ -111,8 +216,10 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                                & (prev_all["Variant"] == variant)
                                & (prev_all["Seed"] == seed)]
                 if len(hit):
-                    best_f1 = float(hit["TrainValF1"].iloc[0])
-                    best_roc = float(hit["TrainValROC"].iloc[0])
+                    if "TrainValF1" in hit:
+                        best_f1 = float(hit["TrainValF1"].iloc[0])
+                    if "TrainValROC" in hit:
+                        best_roc = float(hit["TrainValROC"].iloc[0])
         else:
             trained, best_f1, best_roc = train_model(
                 language=language, epochs=epochs, batch_size=batch_size,
@@ -126,70 +233,96 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        # I restore the per-seed checkpoint before every eval step because
+        # all eval/attack CLIs load the canonical filename.
+        shutil.copyfile(seed_ckpt, ckpt_canon)
+
+        seed_threshold = _resolve_threshold(
+            language, adversarial, ckpt_canon, threshold, threshold_mode,
+            eval_prior, batch_size)
+        how = ("forced" if threshold is not None
+               else ("clean-val calibrated" if threshold_mode == "calibrated" else "fixed"))
+        print(f"[i] Seed {seed} threshold {seed_threshold:.4f} ({how})")
+
         def _row(scenario, res):
             if res is None:
                 return
             rows.append({
                 "Language": language, "Variant": variant, "Seed": seed,
-                "Scenario": scenario, "TrainValF1": best_f1, "TrainValROC": best_roc,
+                "Scenario": scenario, "Threshold": seed_threshold,
+                "ThresholdMode": threshold_mode,
+                "TrainValF1": best_f1, "TrainValROC": best_roc,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
                 "PeakRAM_MB": res.get("PeakRAM_MB", 0.0), "N": res["N"],
             })
 
-        # I restore the per-seed checkpoint before every eval step because
-        # all eval CLIs load the canonical filename.
-        shutil.copyfile(seed_ckpt, ckpt_canon)
-        res = evaluate_model(language=language, batch_size=batch_size,
-                             adversarial=adversarial, threshold=threshold,
-                             seed=seed)
-        _row("Clean Test", res)
-        del res
+        if stage == "attack":
+            df = run_attack_benchmark(language=language, batch_size=batch_size,
+                                      threshold=seed_threshold, base_seed=base_seed,
+                                      adversarial=adversarial, target=target,
+                                      graphs_cache_dir=graphs_cache_dir,
+                                      rebuild_cache=rebuild_cache)
+            for _, r in df.iterrows():
+                # Keep the benchmark's own Clean Test row: the attack stage
+                # does not run evaluate_model separately.
+                _row(r["Scenario"], {"Acc": r["Acc"], "Prec": r["Prec"],
+                                     "Rec": r["Rec"], "F1": r["F1"],
+                                     "ROC": r["ROC"], "FPR": r["FPR"],
+                                     "Latency_ms": r["Lat"], "Throughput": r["Thr"],
+                                     "PeakRAM_MB": r["RAM"], "N": r["N"]})
+            del df
+        else:
+            res = evaluate_model(language=language, batch_size=batch_size,
+                                 adversarial=adversarial, threshold=seed_threshold,
+                                 seed=seed)
+            _row("Clean Test", res)
+            del res
 
-        shutil.copyfile(seed_ckpt, ckpt_canon)
-        df = run_attack_benchmark(language=language, batch_size=batch_size,
-                                  threshold=threshold, base_seed=base_seed,
-                                  adversarial=adversarial,
-                                  graphs_cache_dir=graphs_cache_dir,
-                                  rebuild_cache=rebuild_cache)
-        for _, r in df.iterrows():
-            if r["Scenario"] == "Clean Test":
-                continue  # already covered by evaluate_model above
-            _row(r["Scenario"], {"Acc": r["Acc"], "Prec": r["Prec"], "Rec": r["Rec"],
-                                 "F1": r["F1"], "ROC": r["ROC"], "FPR": r["FPR"],
-                                 "Latency_ms": r["Lat"], "Throughput": r["Thr"],
-                                 "PeakRAM_MB": r["RAM"], "N": r["N"]})
-        del df
-
-        if not skip_external:
             shutil.copyfile(seed_ckpt, ckpt_canon)
-            bundle = load_bundle(language)
-            suites = [s for s in _external_suites(language)]
-            for suite in suites:
-                if suite.startswith("semeval"):
-                    subtask, multi = ("A", False) if suite == "semeval_A" else ("B", True)
-                    fn = {"python": ext.run_external_semeval_python,
-                          "java": ext.run_external_semeval_java,
-                          "cpp": ext.run_external_semeval_cpp}[language]
-                    out = fn(bundle, subtask, multi, batch_size, threshold, variant,
-                             graphs_cache_dir, rebuild_cache)
-                elif suite == "hmcorp":
-                    fn = ext.evaluate_hmcorp_python if language == "python" else ext.evaluate_hmcorp_java
-                    out = fn(bundle, batch_size, threshold, variant,
-                             graphs_cache_dir, rebuild_cache)
-                else:
-                    out = ext.evaluate_gptsniffer(bundle, batch_size, threshold, variant,
-                                                  graphs_cache_dir, rebuild_cache)
-                res = (out or {}).get(variant)
-                _row(_scenario_name(suite), res)
-                del out, res
-            # I drop the bundle here because it holds all graph lists; the
-            # next seed reloads it fresh and I want no CPU-RAM overlap.
-            del bundle
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            df = run_attack_benchmark(language=language, batch_size=batch_size,
+                                      threshold=seed_threshold, base_seed=base_seed,
+                                      adversarial=adversarial, target=target,
+                                      graphs_cache_dir=graphs_cache_dir,
+                                      rebuild_cache=rebuild_cache)
+            for _, r in df.iterrows():
+                if r["Scenario"] == "Clean Test":
+                    continue  # already covered by evaluate_model above
+                _row(r["Scenario"], {"Acc": r["Acc"], "Prec": r["Prec"], "Rec": r["Rec"],
+                                     "F1": r["F1"], "ROC": r["ROC"], "FPR": r["FPR"],
+                                     "Latency_ms": r["Lat"], "Throughput": r["Thr"],
+                                     "PeakRAM_MB": r["RAM"], "N": r["N"]})
+            del df
+
+            if not skip_external:
+                shutil.copyfile(seed_ckpt, ckpt_canon)
+                bundle = load_bundle(language)
+                suites = [s for s in _external_suites(language)]
+                for suite in suites:
+                    if suite.startswith("semeval"):
+                        subtask, multi = ("A", False) if suite == "semeval_A" else ("B", True)
+                        fn = {"python": ext.run_external_semeval_python,
+                              "java": ext.run_external_semeval_java,
+                              "cpp": ext.run_external_semeval_cpp}[language]
+                        out = fn(bundle, subtask, multi, batch_size, seed_threshold, variant,
+                                 graphs_cache_dir, rebuild_cache)
+                    elif suite == "hmcorp":
+                        fn = ext.evaluate_hmcorp_python if language == "python" else ext.evaluate_hmcorp_java
+                        out = fn(bundle, batch_size, seed_threshold, variant,
+                                 graphs_cache_dir, rebuild_cache)
+                    else:
+                        out = ext.evaluate_gptsniffer(bundle, batch_size, seed_threshold, variant,
+                                                      graphs_cache_dir, rebuild_cache)
+                    res = (out or {}).get(variant)
+                    _row(_scenario_name(suite), res)
+                    del out, res
+                # I drop the bundle here because it holds all graph lists; the
+                # next seed reloads it fresh and I want no CPU-RAM overlap.
+                del bundle
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         if out_csv:
             pd.DataFrame(rows, columns=COLUMNS).to_csv(out_csv, index=False)
@@ -230,7 +363,17 @@ if __name__ == "__main__":
                         help="Run the adversarial variant instead of clean (default: clean)")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--threshold", type=float, default=0.50)
+    parser.add_argument("--stage", type=str, default="full", choices=["full", "attack"],
+                        help="'full' = train/eval/attacks/external; 'attack' = eval-side only, "
+                             "reload archived *_seed*.pth checkpoints and run the 9-suite benchmark")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Force one decision cut for every seed (default: calibrated per seed)")
+    parser.add_argument("--threshold-mode", type=str, default="calibrated",
+                        choices=["fixed", "calibrated"],
+                        help="'calibrated' (default) = clean-validation cut with the CPG rule; "
+                             "'fixed' = 0.50")
+    parser.add_argument("--target", type=str, default="machine", choices=["machine", "all"],
+                        help="Attack target rows (default machine-only, matching the paper)")
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
     parser.add_argument("--skip-external", action="store_true")
@@ -238,6 +381,10 @@ if __name__ == "__main__":
                         help="Disable the extract-once graph cache (parse every seed)")
     parser.add_argument("--rebuild-cache", action="store_true",
                         help="Force re-parsing even when cache files exist")
+    parser.add_argument("--purge-cache", action="store_true",
+                        help="Delete this language's *_graphs_*.pt / *_extgraphs_*.pt caches first")
+    parser.add_argument("--keep-cache", action="store_true",
+                        help="Attack stage only: keep existing caches instead of purging them")
     parser.add_argument("--cache-dir", type=str, default=".",
                         help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",
@@ -257,17 +404,30 @@ if __name__ == "__main__":
     # I pass None (not ".") when caching is off so library code takes its
     # original uncached path byte-for-byte.
     graphs_cache_dir = None if args.no_feature_cache else args.cache_dir
+    # Attack-only runs are the cross-model comparison path, so a stale graph
+    # cache is the one silent contaminant I purge by default. --keep-cache
+    # opts out; the full stage only purges when asked.
+    purge_cache = bool(args.purge_cache) or (args.stage == "attack" and not args.keep_cache)
+
     for lang in langs:
-        out_csv = f"five_seed_{lang}_{variant}.csv"
+        if args.stage == "attack":
+            out_csv = f"legacy_{lang}_attack_{args.threshold_mode}.csv"
+            summary_csv = f"legacy_{lang}_attack_{args.threshold_mode}_summary.csv"
+        else:
+            out_csv = f"five_seed_{lang}_{variant}.csv"
+            summary_csv = f"five_seed_{lang}_{variant}_summary.csv"
         df_all = run_language(lang, seeds, adversarial=args.adversarial,
                               epochs=args.epochs, batch_size=args.batch_size,
                               threshold=args.threshold, base_seed=args.base_seed,
                               skip_external=args.skip_external,
                               out_csv=out_csv, resume=args.resume,
                               graphs_cache_dir=graphs_cache_dir,
-                              rebuild_cache=args.rebuild_cache)
+                              rebuild_cache=args.rebuild_cache,
+                              threshold_mode=args.threshold_mode,
+                              stage=args.stage, target=args.target,
+                              purge_cache=purge_cache)
         summary = summarize(df_all[df_all["Language"] == lang])
-        summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
+        summary.to_csv(summary_csv, index=False)
 
         if args.upload:
             # I require an explicit repo and never default to a personal

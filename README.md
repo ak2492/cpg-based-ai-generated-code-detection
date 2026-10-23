@@ -78,6 +78,26 @@ python external_eval.py --language python --suite all
 python external_eval.py --language cpp --suite semeval_A
 python external_eval.py --language java --suite gptsniffer
 
+# Five-seed protocol: train + clean eval + 9-suite attacks + external OOD.
+# Thresholds are clean-validation calibrated by default, matching the CPG and
+# hybrid five-seed tables. Use --threshold-mode fixed for the old 0.50 cut.
+python main.py --language python
+python run_five_seeds.py --language python --seeds 42-46
+
+# Eval-only attack stage for an already-trained set of per-seed checkpoints.
+# No training, no external OOD: reload *_seed*.pth, calibrate each seed's cut
+# on clean validation, run the 9-suite benchmark, write a joinable table.
+# The graph caches are purged first (use --keep-cache to reuse them).
+python run_five_seeds.py --language all --stage attack \
+    --seeds 42-46 --threshold-mode calibrated
+
+# Outputs for the attack stage:
+#   legacy_{language}_attack_calibrated.csv          (per-seed rows)
+#   legacy_{language}_attack_calibrated_summary.csv  (mean +/- std)
+# Columns include Threshold + ThresholdMode, so these rows join the CPG
+# (five_seed_{lang}_clean_cpg.csv) and hybrid tables on
+# (Language, Variant, Scenario, Seed).
+
 # Leakage audit (SHA256, <0.5% PASS; raw rows only, no graphs)
 python leakage_audit.py --language python
 ```
