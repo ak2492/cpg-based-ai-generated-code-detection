@@ -17,12 +17,12 @@ from torch_geometric.loader import DataLoader
 
 from language_configs import DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT
 from model import (ablation_checkpoint_path, build_encoder_from_checkpoint, canonical_ablation,
-                   checkpoint_ablation, checkpoint_threshold)
+                   checkpoint_ablation, checkpoint_threshold, DEFAULT_ABLATION, checkpoint_path_for_config)
 from attack_utils import execute_model_eval_with_cost, print_detailed_metrics_with_cost
 from pipeline import load_bundle_for_ablation, seed_everything
 
 
-def evaluate_model(language="python", batch_size=None, adversarial=False, threshold=None, seed=42, ablation="full"):
+def evaluate_model(language="python", batch_size=None, adversarial=False, threshold=None, seed=42, ablation=DEFAULT_ABLATION):
     # I seed here for completeness; inference itself is deterministic
     # (shuffle=False), so varying seed must not change these scores.
     seed_everything(seed)
@@ -36,16 +36,12 @@ def evaluate_model(language="python", batch_size=None, adversarial=False, thresh
     ctx = bundle["ctx"]
     test_graphs = bundle["test_graphs"]
 
-    if ablation != "full":
-        if adversarial:
-            raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
-        ckpt_file = ablation_checkpoint_path(language, ablation, adversarial)
-    else:
-        ckpt_file = (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
-    if checkpoint_ablation(ckpt_file, device) != ablation:
+    ckpt_file = checkpoint_path_for_config(language, ablation=ablation, adversarial=adversarial)
+    ckpt_abl = checkpoint_ablation(ckpt_file, device)
+    if ckpt_abl != ablation:
         raise ValueError(
             f"Ablation mismatch: --ablation {ablation} but checkpoint {ckpt_file} "
-            f"holds a different config. Graphs and encoder would silently disagree.")
+            f"holds a different config ({ckpt_abl}). Graphs and encoder would silently disagree.")
     if threshold is None:
         # Val-calibrated cut saved by train.py; old checkpoints -> 0.50.
         threshold = checkpoint_threshold(ckpt_file, device)
@@ -56,7 +52,7 @@ def evaluate_model(language="python", batch_size=None, adversarial=False, thresh
     loader = DataLoader(test_graphs, batch_size=batch_size, shuffle=False)
     res = execute_model_eval_with_cost(model, loader, device, threshold=threshold)
     print("\n--- FINAL TEST METRICS ---")
-    tag = f"{language.upper()} Abl-{ablation}" if ablation != "full" else f"{language.upper()} {'Adv' if adversarial else 'Clean'}"
+    tag = f"{language.upper()} Abl-{ablation}" if ablation != DEFAULT_ABLATION else f"{language.upper()} {'Adv' if adversarial else 'Clean'}"
     print_detailed_metrics_with_cost(tag, res)
 
     del loader
@@ -76,7 +72,7 @@ if __name__ == "__main__":
                         help="Decision threshold (default: the checkpoint's val-calibrated value)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed (inference is deterministic; kept for 5-seed protocol uniformity)")
-    parser.add_argument("--ablation", type=str, default="full",
+    parser.add_argument("--ablation", type=str, default=DEFAULT_ABLATION,
                         help="Study config to evaluate: a single id or '+'-joined combo "
                              "(uses its namespaced checkpoint + derived graphs)")
     args = parser.parse_args()

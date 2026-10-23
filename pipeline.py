@@ -203,13 +203,36 @@ def _bundle_has_semantic(bundle):
     return False
 
 
+def ensure_data(language, adversarial=False, rebuild=False):
+    """Ensure the preprocessed CPG bundle exists; build via main.py if missing."""
+    import subprocess
+    import sys
+    path = bundle_path(language)
+    if not os.path.exists(path) or rebuild:
+        print(f"[data] Bundle {path} not found (or rebuild requested); building clean graphs via main.py...")
+        subprocess.run([sys.executable, "main.py", "--language", language], check=True)
+        if adversarial:
+            print(f"[data] Building adversarial pool via main.py --adversarial...")
+            subprocess.run([sys.executable, "main.py", "--language", language, "--adversarial"], check=True)
+    elif adversarial:
+        try:
+            b = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError:
+            b = torch.load(path, map_location="cpu")
+        except Exception:
+            b = None
+        if b is None or b.get("train_adv_graphs") is None:
+            print(f"[data] Bundle {path} missing adversarial pool; building via main.py --adversarial...")
+            subprocess.run([sys.executable, "main.py", "--language", language, "--adversarial"], check=True)
+    return path
+
+
 def load_bundle(language, path=None):
     from tokenizers import Tokenizer
     path = path or bundle_path(language)
     if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"Bundle not found: {path}. Run `python main.py --language {language}` first"
-            " (add --adversarial if you need the adv pool).")
+        print(f"[data] Bundle not found at {path}. Automatically extracting...")
+        ensure_data(language)
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)
     except TypeError:  # torch < 2.6 without the weights_only kwarg

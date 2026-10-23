@@ -25,7 +25,9 @@ from language_configs import (
     BPE_VOCAB_SIZE,
     DEFAULT_BATCH_SIZE, CLEAN_CHECKPOINT, ADV_CHECKPOINT,
 )
-from model import AdvancedASTGraphEncoder, ablation_checkpoint_path, canonical_ablation, save_checkpoint_for_language
+from model import (AdvancedASTGraphEncoder, ablation_checkpoint_path, canonical_ablation,
+                   save_checkpoint_for_language, DEFAULT_ABLATION, DEFAULT_NUM_LAYERS,
+                   checkpoint_path_for_config, is_default_architecture)
 from attack_utils import current_rss_mb, execute_model_eval_with_cost, print_detailed_metrics_with_cost
 from pipeline import load_bundle_for_ablation, require_adv_graphs, seed_everything
 
@@ -147,14 +149,14 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                        grad_clip=1.0, threshold=0.50,
                        type_dim=64, subword_dim=128, hidden_dim=256,
-                       num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
+                       num_layers=DEFAULT_NUM_LAYERS, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                        cls_hidden1=256, cls_hidden2=64,
-                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation="full",
+                       dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, ablation=DEFAULT_ABLATION,
                        semantic_dim=None, sem_hidden=256, sem_dropout=0.2,
                        test_graphs=None, test_every=5, epoch_probe=None):
     ablation = canonical_ablation(ablation)
-    if adversarial and ablation != "full":
-        raise ValueError("Ablations run clean-only; --adversarial is only valid with --ablation full.")
+    if adversarial and not (is_default_architecture(ablation, num_layers) or ablation == "full"):
+        raise ValueError("Adversarial training is supported for the production L4_mp2 model and legacy full; other study ablations run clean-only.")
     # I probe the bundle here (instead of a CLI default) because the semantic
     # width is a property of the data: bundles built with main.py --no-semantic
     # have no `.sem` and must keep training the pre-semantic architecture.
@@ -314,9 +316,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     print(f"[i] Val-calibrated threshold: {cal_threshold:.4f} (fixed {threshold:.2f}, "
           f"eval prior {prior_txt}; eval now uses the checkpoint value)")
 
-    ckpt_file = (ablation_checkpoint_path(language, ablation, adversarial)
-                 if ablation != "full" else
-                 (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language])
+    ckpt_file = checkpoint_path_for_config(language, ablation=ablation, num_layers=num_layers, adversarial=adversarial)
     save_checkpoint_for_language(language, ckpt_file, model, optimizer, epoch,
                                  best_f1, best_roc, cal_threshold,
                                  ctx.means, ctx.stds, ctx.g_means, ctx.g_stds,
@@ -339,9 +339,9 @@ def train_model(language="python", epochs=30, batch_size=None, adversarial=False
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
                 type_dim=64, subword_dim=128, hidden_dim=256,
-                num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
+                num_layers=DEFAULT_NUM_LAYERS, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                 cls_hidden1=256, cls_hidden2=64,
-                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation="full",
+                dropout_cls1=0.3, dropout_cls2=0.2, mask_rate=0.15, seed=42, ablation=DEFAULT_ABLATION,
                 semantic_dim=None, sem_hidden=256, sem_dropout=0.2,
                 test_every=5):
     """Train one model from the saved bundle. Never builds CPGs.
@@ -401,7 +401,7 @@ def _add_hyper_args(parser):
     parser.add_argument("--type_dim", type=int, default=64)
     parser.add_argument("--subword_dim", type=int, default=128)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--num_layers", type=int, default=DEFAULT_NUM_LAYERS)
     parser.add_argument("--dropout_gnn", type=float, default=0.15)
     parser.add_argument("--pool_hidden", type=int, default=128)
     parser.add_argument("--film_hidden", type=int, default=128)
@@ -430,7 +430,7 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
-    parser.add_argument("--ablation", type=str, default="full",
+    parser.add_argument("--ablation", type=str, default=DEFAULT_ABLATION,
                         help="Study config: a single id or '+'-joined combo "
                              "(full no-mp no-subword no-struct syntax-only no-gate no-jk "
                              "no-virtual mean-pool no-film no-semantic); clean-only, namespaced checkpoint")

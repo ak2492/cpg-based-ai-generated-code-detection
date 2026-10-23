@@ -1,17 +1,15 @@
-"""Five-seed protocol runner — train + clean eval + 9-suite attacks + external OOD.
+"""5-seed benchmark runner with extract-once attack graphs cache.
 
-Runs the full benchmark for each training seed over IDENTICAL data bundles
-(main.py output) and identical attacked sets (attack --base_seed fixed at 42),
-then reports every seed's values plus mean +/- std. No manual math.
+Trains 5 random-seed instances (seeds 42-46) per language on clean or adversarial
+data, saves per-seed checkpoint archives alongside the canonical file, evaluates
+each model across 27 attack scenarios (Sec 4.7 benchmark) + held-out external
+benchmarks (SemEval-2024 Task 8 Subtask A/B, HMCorp, GPTSniffer), and writes
+full metric rows + a mean +/- std summary CSV.
 
-Sequential usage (bundles first, once per language):
-  python main.py --language python
+Sequential usage:
   python run_five_seeds.py --language python
-  python run_five_seeds.py --language all --seeds 42-46 --adversarial
-
-Per-seed checkpoints are copied to *_seed{s}.pth BEFORE the next seed
-overwrites the canonical file, and copied back before every eval step, so
-existing single-seed CLIs work unmodified.
+  python run_five_seeds.py --language java --adversarial
+  python run_five_seeds.py --language all --seeds 42-46
 """
 import argparse
 import gc
@@ -24,17 +22,17 @@ import pandas as pd
 import torch
 
 from language_configs import CLEAN_CHECKPOINT, ADV_CHECKPOINT
-from model import checkpoint_threshold
+from model import checkpoint_threshold, DEFAULT_ABLATION
 from train import train_model
 from evaluate import evaluate_model
 from attack_evaluation import run_attack_benchmark
-from pipeline import load_bundle
+from pipeline import load_bundle, ensure_data
 import external_eval as ext
 
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
                "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
-COLUMNS = (["Language", "Variant", "Seed", "Scenario", "TrainValF1", "TrainValROC"]
+COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "TrainValF1", "TrainValROC"]
            + METRIC_COLS)
 
 
@@ -79,7 +77,10 @@ def _scenario_name(suite):
 def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                  threshold=None, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
-                 rebuild_cache=False):
+                 rebuild_cache=False, rebuild_bundle=False,
+                 ablation=DEFAULT_ABLATION):
+    # Ensure CPG bundle exists; auto-extract via main.py if missing
+    ensure_data(language, adversarial=adversarial, rebuild=rebuild_bundle)
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     ckpt_canon, ckpt_tpl = _ckpt_files(language, adversarial)
@@ -117,7 +118,7 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
         else:
             trained, best_f1, best_roc = train_model(
                 language=language, epochs=epochs, batch_size=batch_size,
-                adversarial=adversarial, seed=seed)
+                adversarial=adversarial, seed=seed, ablation=ablation)
             shutil.copyfile(ckpt_canon, seed_ckpt)
             print(f"Checkpoint archived -> {seed_ckpt}")
             # I delete the trained model here because the next seed allocates
@@ -132,7 +133,8 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                 return
             rows.append({
                 "Language": language, "Variant": variant, "Seed": seed,
-                "Scenario": scenario, "TrainValF1": best_f1, "TrainValROC": best_roc,
+                "Scenario": scenario, "Threshold": seed_threshold,
+                "TrainValF1": best_f1, "TrainValROC": best_roc,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
@@ -150,7 +152,7 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
               + (" (checkpoint-calibrated)" if threshold is None else " (forced via --threshold)"))
         res = evaluate_model(language=language, batch_size=batch_size,
                              adversarial=adversarial, threshold=seed_threshold,
-                             seed=seed)
+                             seed=seed, ablation=ablation)
         _row("Clean Test", res)
         del res
 
@@ -165,17 +167,18 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                 continue  # already covered by evaluate_model above
             _row(r["Scenario"], {"Acc": r["Acc"], "Prec": r["Prec"], "Rec": r["Rec"],
                                  "F1": r["F1"], "ROC": r["ROC"], "FPR": r["FPR"],
-                                 "Latency_ms": r["Lat"], "Throughput": r["Thr"],
-                                 "PeakRAM_MB": r["RAM"], "N": r["N"]})
-        del df
+                                 "Latency_ms": r.get("Latency_ms", 0.0),
+                                 "Throughput": r.get("Throughput", 0.0),
+                                 "PeakRAM_MB": r.get("PeakRAM_MB", 0.0),
+                                 "N": r.get("N", 0)})
 
         if not skip_external:
             shutil.copyfile(seed_ckpt, ckpt_canon)
             bundle = load_bundle(language)
-            suites = [s for s in _external_suites(language)]
-            for suite in suites:
-                if suite.startswith("semeval"):
-                    subtask, multi = ("A", False) if suite == "semeval_A" else ("B", True)
+            for suite in _external_suites(language):
+                if suite.startswith("semeval_"):
+                    subtask = suite.split("_")[1].upper()
+                    multi = (subtask == "B")
                     fn = {"python": ext.run_external_semeval_python,
                           "java": ext.run_external_semeval_java,
                           "cpp": ext.run_external_semeval_cpp}[language]
@@ -191,39 +194,52 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                 res = (out or {}).get(variant)
                 _row(_scenario_name(suite), res)
                 del out, res
-            # I drop the bundle here because it holds all graph lists; the
-            # next seed reloads it fresh and I want no CPU-RAM overlap.
             del bundle
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        # Incremental save after each seed finishes so a killed session leaves
+        # a complete CSV of every seed run up to that point.
+        df_seed = pd.DataFrame(rows, columns=COLUMNS)
         if out_csv:
-            pd.DataFrame(rows, columns=COLUMNS).to_csv(out_csv, index=False)
+            df_seed.to_csv(out_csv, index=False)
+            print(f"[{language.upper()}] incremental rows saved to {out_csv} "
+                  f"({len(df_seed)} rows through seed {seed})")
 
-    df_all = pd.DataFrame(rows, columns=COLUMNS)
-    if out_csv:
-        df_all.to_csv(out_csv, index=False)
-    return df_all
+    return pd.DataFrame(rows, columns=COLUMNS)
 
 
-def summarize(df_all):
-    cur = df_all
-    print("\n" + "=" * 100)
-    print("PER-SEED RESULTS")
-    print("=" * 100)
-    print(cur.to_string(index=False))
-    summary = cur.groupby(["Language", "Variant", "Scenario"], as_index=False).agg(
-        {c: ["mean", "std"] for c in METRIC_COLS + ["TrainValF1", "TrainValROC"]})
-    summary.columns = ["_".join(c).strip("_") for c in summary.columns.values]
-    print("\n" + "=" * 100)
-    print("SUMMARY: MEAN +/- STD (sample std, ddof=1)")
-    print("=" * 100)
-    show = summary.copy()
-    for c in METRIC_COLS:
-        show[c] = (summary[f"{c}_mean"].map("{:.4f}".format) + " +/- "
-                   + summary[f"{c}_std"].map("{:.4f}".format))
-    print(show[["Language", "Variant", "Scenario"] + METRIC_COLS].to_string(index=False))
+def summarize(df):
+    """Compute mean +/- std across seeds for each scenario."""
+    if df.empty:
+        return pd.DataFrame()
+    records = []
+    # I group by (Language, Variant, Scenario) so multi-config CSVs (e.g. from
+    # --language all) summarize cleanly without cross-language cross-contamination.
+    keys = ["Language", "Variant", "Scenario"]
+    for (lang, var, scen), group in df.groupby(keys, sort=False):
+        row = {"Language": lang, "Variant": var, "Scenario": scen,
+               "Seeds": len(group["Seed"].unique())}
+        for col in METRIC_COLS:
+            vals = group[col].dropna()
+            if len(vals) == 0:
+                row[f"{col}_mean"] = float("nan")
+                row[f"{col}_std"] = float("nan")
+            else:
+                row[f"{col}_mean"] = vals.mean()
+                row[f"{col}_std"] = vals.std(ddof=1) if len(vals) > 1 else 0.0
+        records.append(row)
+    summary = pd.DataFrame(records)
+    # Order scenarios logically: Clean Test first, then attacks, then external
+    def _rank(scen):
+        if scen == "Clean Test":
+            return (0, scen)
+        if scen.startswith("Ext "):
+            return (2, scen)
+        return (1, scen)
+    summary["_rank"] = summary["Scenario"].apply(_rank)
+    summary = summary.sort_values(by=["Language", "Variant", "_rank"]).drop(columns=["_rank"])
     return summary
 
 
@@ -242,11 +258,15 @@ if __name__ == "__main__":
                              "checkpoint-calibrated value from training)")
     parser.add_argument("--base_seed", type=int, default=42,
                         help="Fixed attack-sampling seed (keep 42 so attacked sets match across training seeds)")
+    parser.add_argument("--ablation", type=str, default=DEFAULT_ABLATION,
+                        help="Model architecture ablation (default: L4_mp2 'mean-pool+no-film')")
     parser.add_argument("--skip-external", action="store_true")
     parser.add_argument("--no-feature-cache", action="store_true",
                         help="Disable the extract-once graph cache (parse every seed)")
     parser.add_argument("--rebuild-cache", action="store_true",
                         help="Force re-parsing even when cache files exist")
+    parser.add_argument("--rebuild-bundle", action="store_true",
+                        help="Force re-extracting the CPG bundle via main.py")
     parser.add_argument("--cache-dir", type=str, default=".",
                         help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",
@@ -274,7 +294,9 @@ if __name__ == "__main__":
                               skip_external=args.skip_external,
                               out_csv=out_csv, resume=args.resume,
                               graphs_cache_dir=graphs_cache_dir,
-                              rebuild_cache=args.rebuild_cache)
+                              rebuild_cache=args.rebuild_cache,
+                              rebuild_bundle=args.rebuild_bundle,
+                              ablation=args.ablation)
         summary = summarize(df_all[df_all["Language"] == lang])
         summary.to_csv(f"five_seed_{lang}_{variant}_summary.csv", index=False)
 

@@ -34,9 +34,13 @@ class GatedGNNLayer(nn.Module):
 # semantic_dim defaults to 0 so pre-semantic checkpoints rebuild byte-identically;
 # train_single_model probes the bundle and stores the real width (768) in the
 # checkpoint, so eval always reconstructs the trained architecture.
+DEFAULT_ARCH_NAME = "L4_mp2"
+DEFAULT_ABLATION = "mean-pool+no-film"
+DEFAULT_NUM_LAYERS = 2
+
 HPARAM_DEFAULTS = {
     'type_dim': 64, 'subword_dim': 128, 'hidden_dim': 256,
-    'num_layers': 4, 'dropout_gnn': 0.15,
+    'num_layers': 2, 'dropout_gnn': 0.15,
     'pool_hidden': 128, 'film_hidden': 128,
     'cls_hidden1': 256, 'cls_hidden2': 64,
     'dropout_cls1': 0.3, 'dropout_cls2': 0.2,
@@ -115,6 +119,13 @@ def canonical_ablation(ablation):
     return "+".join(parse_ablation(ablation))
 
 
+def is_default_architecture(ablation, num_layers=None):
+    """True for the frozen L4_mp2 production config (2-layer mean-pool/no-FiLM)."""
+    if canonical_ablation(ablation) != DEFAULT_ABLATION:
+        return False
+    return num_layers is None or int(num_layers) == DEFAULT_NUM_LAYERS
+
+
 def graph_variant_for_ablation(ablation):
     """Return the graph variant an ablation id trains/evaluates on."""
     variants = graph_variants_for_ablation(ablation)
@@ -137,9 +148,9 @@ def graph_variants_for_ablation(ablation):
 
 class AdvancedASTGraphEncoder(nn.Module):
     def __init__(self, num_node_types, bpe_vocab_size, type_dim=64, struct_dim=28, subword_dim=128, hidden_dim=256, num_relations=16, pad_idx=0, global_dim=37,
-                 num_layers=4, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
+                 num_layers=DEFAULT_NUM_LAYERS, dropout_gnn=0.15, pool_hidden=128, film_hidden=128,
                  cls_hidden1=256, cls_hidden2=64, dropout_cls1=0.3, dropout_cls2=0.2,
-                 mask_rate=0.15, ablation="full", semantic_dim=0, sem_hidden=256, sem_dropout=0.2):
+                 mask_rate=0.15, ablation=DEFAULT_ABLATION, semantic_dim=0, sem_hidden=256, sem_dropout=0.2):
         super().__init__()
         parts = set(parse_ablation(ablation))
         self.ablation = canonical_ablation(ablation)
@@ -284,11 +295,11 @@ class AdvancedASTGraphEncoder(nn.Module):
         return self.classifier(graph_emb).view(-1)
 
 
-def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams=None, ablation="full"):
+def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams=None, ablation=DEFAULT_ABLATION):
     return {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        # optimizer_state_dict omitted to reduce file size (~16MB instead of ~50MB, no resume needed)
         'val_f1': val_f1,
         'val_roc': val_roc,
         'optimal_threshold': threshold,
@@ -297,31 +308,28 @@ def _checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means,
         'global_means': g_means,
         'global_stds': g_stds,
         'hyperparams': dict(hyperparams) if hyperparams else dict(HPARAM_DEFAULTS),
-        # I persist the ablation id so eval rebuilds the matching encoder
-        # variant automatically; old checkpoints predate the study and read
-        # back as "full".
         'ablation': ablation,
     }
 
 
-def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation=DEFAULT_ABLATION):
     torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint preserved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_cpp_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation=DEFAULT_ABLATION):
     torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     fsize_mb = os.path.getsize(filepath) / (1024 * 1024)
     print(f"[+] Checkpoint saved at: {filepath} ({fsize_mb:.2f} MB)")
 
 
-def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation=DEFAULT_ABLATION):
     torch.save(_checkpoint_dict(model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation), filepath)
     print(f"[+] Checkpoint safely preserved at: {filepath}")
 
 
-def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation="full"):
+def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means=None, stds=None, g_means=None, g_stds=None, hyperparams=None, ablation=DEFAULT_ABLATION):
     if language == "python":
         return save_python_checkpoint(filepath, model, optimizer, epoch, val_f1, val_roc, threshold, means, stds, g_means, g_stds, hyperparams, ablation)
     elif language == "cpp":
@@ -333,12 +341,26 @@ def save_checkpoint_for_language(language, filepath, model, optimizer, epoch, va
 def ablation_checkpoint_path(language, ablation, adversarial=False):
     """Namespaced checkpoint file for an ablation run.
 
-    Every non-full config (single or combined, canonically ordered) gets its
+    Every non-default config (single or combined, canonically ordered) gets its
     own file so study runs can never clobber the main checkpoints.
     """
     canonical = canonical_ablation(ablation)
     tag = "adv" if adversarial else "clean"
     return f"model_{tag}_abl-{canonical}_{language}.pth"
+
+
+def checkpoint_path_for_config(language, ablation=None, num_layers=None, adversarial=False):
+    """Resolve where a config's checkpoint lives.
+
+    The frozen L4_mp2 production config (mean-pool+no-film, 2 layers) owns the
+    canonical clean/adv filenames so evaluate.py, attack_evaluation.py,
+    external_eval.py and run_five_seeds.py work without extra flags.
+    """
+    from language_configs import CLEAN_CHECKPOINT, ADV_CHECKPOINT
+    canon = canonical_ablation(DEFAULT_ABLATION if ablation is None else ablation)
+    if is_default_architecture(canon, num_layers):
+        return (ADV_CHECKPOINT if adversarial else CLEAN_CHECKPOINT)[language]
+    return ablation_checkpoint_path(language, canon, adversarial)
 
 
 def load_checkpoint(filepath, model, device, optimizer=None):
@@ -353,13 +375,30 @@ def load_checkpoint(filepath, model, device, optimizer=None):
 
 
 def checkpoint_hparams(filepath, device="cpu"):
-    """Read only the hyperparams dict from a checkpoint (defaults for old files)."""
+    """Read hyperparams from a checkpoint, inferring them for legacy files."""
     try:
         ckpt = torch.load(filepath, map_location=device, weights_only=False)
     except TypeError:
         ckpt = torch.load(filepath, map_location=device)
+    stored = ckpt.get('hyperparams') or {}
     hp = dict(HPARAM_DEFAULTS)
-    hp.update(ckpt.get('hyperparams') or {})
+    hp.update(stored)
+    state = ckpt.get('model_state_dict') or {}
+    if 'num_layers' not in stored:
+        layer_ids = set()
+        for key in state:
+            if key.startswith('layers.'):
+                try:
+                    layer_ids.add(int(key.split('.')[1]))
+                except (IndexError, ValueError):
+                    pass
+        if layer_ids:
+            hp['num_layers'] = max(layer_ids) + 1
+    if 'semantic_dim' not in stored:
+        sem_weight = state.get('sem_proj.0.weight')
+        if sem_weight is not None and getattr(sem_weight, 'ndim', 0) == 2:
+            hp['semantic_dim'] = int(sem_weight.shape[1])
+            hp['sem_hidden'] = int(sem_weight.shape[0])
     return hp
 
 
@@ -390,7 +429,7 @@ def checkpoint_threshold(filepath, device="cpu", default=0.50):
         return default
 
 
-def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation="full"):
+def build_encoder(ctx, hparams=None, device="cpu", bpe_vocab_size=None, ablation=DEFAULT_ABLATION):
     """Rebuild the encoder for eval: checkpoint hyperparams win, else notebook defaults."""
     from language_configs import BPE_VOCAB_SIZE
     hp = dict(HPARAM_DEFAULTS)

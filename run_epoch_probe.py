@@ -1,7 +1,8 @@
 """Epoch-by-epoch training-budget and checkpoint-selection probe (diagnostic).
 
 Trains selected ladder rungs for a fixed budget (default 50 epochs) and, after
-EVERY epoch, evaluates the CURRENT weights on the complete held-out test split.
+EVERY epoch, evaluates the CURRENT weights on the complete held-out test split
+exclusively at the validation-calibrated optimal threshold.
 This is a read-only diagnostic: test metrics never affect gradients, the
 optimizer/scheduler, checkpoint selection, early stopping or thresholds inside
 the run. They exist to answer two questions after the fact:
@@ -26,20 +27,14 @@ Outputs (in the repo working directory):
   epoch_probe_<lang>.csv                     one row per (rung, seed, epoch)
   epoch_probe_<lang>_live.csv                current model's rows, rewritten each epoch
   epoch_probe_<lang>_summary.csv             one row per (rung, seed, candidate)
+  epoch_probe_<lang>_multiseed_summary.csv   aggregated mean +/- std across seeds
   probe_<lang>_<rung>_s<seed>_bestvalf1.pth  copy of the standard checkpoint
   probe_<lang>_<rung>_s<seed>_bestvalroc.pth raw state dict (diagnostic)
   probe_<lang>_<rung>_s<seed>_final.pth      raw state dict (diagnostic)
 
-The console line per epoch prints test accuracy, precision, recall, F1, ROC and
-the val-calibrated-threshold F1; the CSV carries the same numbers (plus FPR).
-
-Reruns merge by (rung, seed, epoch); `--resume` skips models whose per-epoch
-rows already reach the requested epoch count.
-
 Usage:
-  python -u run_epoch_probe.py --language java --rungs L0_semtype,L2_subword,L3_mp1
-  python -u run_epoch_probe.py --language cpp --rungs L3_mp1,L4_mp2
-  python -u run_epoch_probe.py --language java --rungs L2_subword --seeds 42,43 --resume
+  python -u run_epoch_probe.py --language cpp --rungs L4_mp2 --seeds 42-46 --epochs 50
+  python -u run_epoch_probe.py --language java --rungs L4_mp2 --seeds 42 --resume
 """
 import argparse
 import contextlib
@@ -51,12 +46,13 @@ import shutil
 import time
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import roc_auc_score
 from torch_geometric.loader import DataLoader
 
-from language_configs import CLEAN_CHECKPOINT, DEFAULT_BATCH_SIZE
-from model import ablation_checkpoint_path, canonical_ablation
+from language_configs import DEFAULT_BATCH_SIZE
+from model import (canonical_ablation, checkpoint_path_for_config, DEFAULT_ABLATION)
 from pipeline import load_bundle_for_ablation, seed_everything
 from run_ladder import LADDER
 from train import _select_threshold, train_single_model
@@ -64,22 +60,35 @@ from train import _select_threshold, train_single_model
 EPOCH_FIELDS = (
     "language", "rung", "seed", "epoch", "epochs_total",
     "ablation", "num_layers", "params", "params_m",
-    "train_loss", "val_f1", "val_roc", "val_thr",
+    "train_loss", "val_f1", "val_roc", "threshold",
     "test_acc", "test_prec", "test_rec", "test_f1", "test_roc", "test_fpr",
-    "test_acc_thr", "test_prec_thr", "test_rec_thr", "test_f1_thr", "test_fpr_thr",
     "epoch_seconds",
 )
 
 SUMMARY_FIELDS = (
     "language", "rung", "seed", "candidate", "diagnostic", "epoch",
-    "val_f1", "val_roc", "val_thr",
+    "val_f1", "val_roc", "threshold",
     "test_acc", "test_prec", "test_rec", "test_f1", "test_roc", "test_fpr",
-    "test_acc_thr", "test_prec_thr", "test_rec_thr", "test_f1_thr", "test_fpr_thr",
     "params", "params_m", "train_min",
 )
 
 CANDIDATES = ("best_val_f1", "best_val_roc", "final_epoch",
               "oracle_test_f1", "oracle_test_roc")
+
+
+def parse_seeds(spec):
+    """Accept '42,43,44,45,46', '42-46', or mixes like '42-44,46'."""
+    seeds = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            seeds.extend(range(int(lo), int(hi) + 1))
+        else:
+            seeds.append(int(part))
+    return sorted(set(seeds))
 
 
 def _rung_index(name):
@@ -173,8 +182,8 @@ def _rounded(value, ndigits=6):
 
 
 def _epoch_row(lang, rung, seed, epoch, epochs, ablation, layers, params,
-               train_loss, val_f1, val_roc, val_thr, test_metrics, test_roc,
-               test_metrics_thr, epoch_seconds):
+               train_loss, val_f1, val_roc, threshold, test_metrics, test_roc,
+               epoch_seconds):
     return {
         "language": lang, "rung": rung, "seed": seed,
         "epoch": epoch, "epochs_total": epochs,
@@ -182,55 +191,69 @@ def _epoch_row(lang, rung, seed, epoch, epochs, ablation, layers, params,
         "params": params, "params_m": _rounded(params / 1e6, 3),
         "train_loss": _rounded(train_loss),
         "val_f1": _rounded(val_f1), "val_roc": _rounded(val_roc),
-        "val_thr": _rounded(val_thr),
+        "threshold": _rounded(threshold),
         "test_acc": _rounded(test_metrics["acc"]),
         "test_prec": _rounded(test_metrics["prec"]),
         "test_rec": _rounded(test_metrics["rec"]),
         "test_f1": _rounded(test_metrics["f1"]),
         "test_roc": _rounded(test_roc),
         "test_fpr": _rounded(test_metrics["fpr"]),
-        "test_acc_thr": _rounded(test_metrics_thr["acc"]),
-        "test_prec_thr": _rounded(test_metrics_thr["prec"]),
-        "test_rec_thr": _rounded(test_metrics_thr["rec"]),
-        "test_f1_thr": _rounded(test_metrics_thr["f1"]),
-        "test_fpr_thr": _rounded(test_metrics_thr["fpr"]),
         "epoch_seconds": round(float(epoch_seconds), 2),
     }
 
 
 def _summary_row(lang, rung, seed, candidate, diagnostic, epoch, params,
-                 train_min, val_f1, val_roc, val_thr, test_metrics, test_roc,
-                 test_metrics_thr):
+                 train_min, val_f1, val_roc, threshold, test_metrics, test_roc):
     return {
         "language": lang, "rung": rung, "seed": seed,
         "candidate": candidate, "diagnostic": diagnostic, "epoch": epoch,
         "val_f1": _rounded(val_f1), "val_roc": _rounded(val_roc),
-        "val_thr": _rounded(val_thr),
+        "threshold": _rounded(threshold),
         "test_acc": _rounded(test_metrics["acc"]),
         "test_prec": _rounded(test_metrics["prec"]),
         "test_rec": _rounded(test_metrics["rec"]),
         "test_f1": _rounded(test_metrics["f1"]),
         "test_roc": _rounded(test_roc),
         "test_fpr": _rounded(test_metrics["fpr"]),
-        "test_acc_thr": _rounded(test_metrics_thr["acc"]),
-        "test_prec_thr": _rounded(test_metrics_thr["prec"]),
-        "test_rec_thr": _rounded(test_metrics_thr["rec"]),
-        "test_f1_thr": _rounded(test_metrics_thr["f1"]),
-        "test_fpr_thr": _rounded(test_metrics_thr["fpr"]),
         "params": params, "params_m": _rounded(params / 1e6, 3),
         "train_min": round(float(train_min), 2),
     }
 
 
+def _save_multiseed_summary(summary_csv_path, multiseed_out_path):
+    if not os.path.exists(summary_csv_path):
+        return
+    df = pd.read_csv(summary_csv_path)
+    if df.empty:
+        return
+    metric_cols = ["val_f1", "val_roc", "threshold", "test_acc", "test_prec", "test_rec", "test_f1", "test_roc", "test_fpr", "train_min"]
+    records = []
+    group_keys = ["language", "rung", "candidate", "diagnostic"]
+    for keys, group in df.groupby(group_keys, sort=False):
+        row = {
+            "language": keys[0], "rung": keys[1], "candidate": keys[2], "diagnostic": keys[3],
+            "seeds": len(group["seed"].unique()),
+        }
+        for col in metric_cols:
+            if col in group:
+                vals = group[col].dropna()
+                row[f"{col}_mean"] = vals.mean()
+                row[f"{col}_std"] = vals.std(ddof=1) if len(vals) > 1 else 0.0
+        records.append(row)
+    summary_df = pd.DataFrame(records)
+    summary_df.to_csv(multiseed_out_path, index=False)
+    print(f"[i] Multi-seed summary saved to {multiseed_out_path}", flush=True)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Per-epoch test probe (diagnostic)")
+    parser = argparse.ArgumentParser(description="Per-epoch test probe evaluated at best threshold (diagnostic)")
     parser.add_argument("--language", default="java", choices=["python", "java", "cpp"])
-    parser.add_argument("--seeds", default="42",
-                        help="Comma-separated seeds, e.g. 42 or 42,43,44,45,46")
-    parser.add_argument("--rungs", default="all",
-                        help="'all' or comma-separated rung names from run_ladder.LADDER")
+    parser.add_argument("--seeds", default="42-46",
+                        help="Seed list, e.g. '42-46' or '42,43,44,45,46'")
+    parser.add_argument("--rungs", default="L4_mp2",
+                        help="'all', 'L4_mp2', or comma-separated rung names from run_ladder.LADDER")
     parser.add_argument("--epochs", type=int, default=50,
-                        help="Training budget (protocol controls stay fixed)")
+                        help="Training budget (default: 50 epochs)")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--out", default=None,
                         help="Per-epoch CSV (default: epoch_probe_<language>.csv)")
@@ -242,7 +265,7 @@ def main():
                         help="Skip (rung, seed) models already complete for this epoch budget")
     args = parser.parse_args()
 
-    seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+    seeds = parse_seeds(args.seeds)
     wanted = None if args.rungs.strip().lower() == "all" else {
         r.strip() for r in args.rungs.split(",") if r.strip()}
     rungs = [r for r in LADDER if wanted is None or r[0] in wanted]
@@ -252,6 +275,7 @@ def main():
     lang = args.language
     out_path = args.out or ("epoch_probe_%s.csv" % lang)
     summary_path = args.summary_out or ("epoch_probe_%s_summary.csv" % lang)
+    multiseed_path = "epoch_probe_%s_multiseed_summary.csv" % lang
     live_path = args.live_out or ("epoch_probe_%s_live.csv" % lang)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     batch_size = args.batch_size or DEFAULT_BATCH_SIZE[lang]
@@ -259,13 +283,13 @@ def main():
     print("[i] Epoch probe: language=%s seeds=%s epochs=%d batch=%d device=%s"
           % (lang, seeds, args.epochs, batch_size, device), flush=True)
     print("[i] Selection rules compared: best val F1 / best val ROC / final epoch "
-          "(+ oracle test upper bounds, diagnostic only)", flush=True)
+          "(evaluated exclusively at validation-calibrated optimal threshold)", flush=True)
     print("[i] Live CSV (current model, rewritten each epoch): %s" % live_path, flush=True)
     for name, ablation, layers, desc in rungs:
         print("    - %-10s ablation=%-45s layers=%d  %s"
               % (name, canonical_ablation(ablation), layers, desc), flush=True)
 
-    bundle = load_bundle_for_ablation(lang, "full")
+    bundle = load_bundle_for_ablation(lang, DEFAULT_ABLATION)
     ctx = bundle["ctx"]
     train_g = bundle["train_clean_graphs"]
     val_g = bundle["val_graphs"]
@@ -318,19 +342,16 @@ def main():
                     state["params"] = sum(p.numel() for p in model.parameters())
                 test_probs, test_labels = _probs(model, test_loader, device)
                 test_roc = _auc(test_probs, test_labels)
-                m50 = _metrics_at(test_probs, test_labels, 0.50)
-                val_thr = _quiet_select(np.asarray(val_probs), np.asarray(val_labels),
-                                        eval_prior)
+                val_thr = _quiet_select(np.asarray(val_probs), np.asarray(val_labels), eval_prior)
                 mthr = _metrics_at(test_probs, test_labels, val_thr)
                 state["rows"].append(_epoch_row(
                     lang, name, seed, epoch + 1, epochs, ablation, layers,
                     state["params"], train_loss, val_f1, val_roc, val_thr,
-                    m50, test_roc, mthr, epoch_seconds))
+                    mthr, test_roc, epoch_seconds))
                 _write_rows(live_path, EPOCH_FIELDS, state["rows"])
-                print("    [probe %02d] test acc %.4f | P %.4f R %.4f F1 %.4f | "
-                      "ROC %.4f | thr %.3f F1 %.4f"
-                      % (epoch + 1, m50["acc"], m50["prec"], m50["rec"], m50["f1"],
-                         test_roc, val_thr, mthr["f1"]),
+                print("    [probe %02d] test acc %.4f | P %.4f R %.4f F1 %.4f | ROC %.4f | thr %.4f | loss %.4f (%0.1fs)"
+                      % (epoch + 1, mthr["acc"], mthr["prec"], mthr["rec"], mthr["f1"],
+                         test_roc, val_thr, train_loss, epoch_seconds),
                       flush=True)
                 if val_f1 > state["best_f1"]:
                     state["best_f1"] = float(val_f1)
@@ -364,17 +385,15 @@ def main():
                 val_thr = _quiet_select(val_probs, val_labels, eval_prior)
                 test_probs, test_labels = _probs(model, test_loader, device)
                 test_roc = _auc(test_probs, test_labels)
-                m50 = _metrics_at(test_probs, test_labels, 0.50)
                 mthr = _metrics_at(test_probs, test_labels, val_thr)
                 row = _summary_row(
                     lang, name, seed, candidate, diagnostic, cand_epoch, params,
-                    train_min, 0.0, 0.0, val_thr, m50, test_roc, mthr)
-                # Candidate rows carry the val scores recorded at their epoch.
+                    train_min, 0.0, 0.0, val_thr, mthr, test_roc)
                 matching = next((r for r in state["rows"] if r["epoch"] == cand_epoch), None)
                 if matching is not None:
                     row["val_f1"] = matching["val_f1"]
                     row["val_roc"] = matching["val_roc"]
-                    row["val_thr"] = matching["val_thr"]
+                    row["threshold"] = matching["threshold"]
                 summary_rows.append(row)
 
             rows = state["rows"]
@@ -384,21 +403,17 @@ def main():
                                    ("oracle_test_roc", oracle_roc)):
                 summary_rows.append(_summary_row(
                     lang, name, seed, candidate, "yes", int(row["epoch"]), params,
-                    train_min, row["val_f1"], row["val_roc"], row["val_thr"],
+                    train_min, row["val_f1"], row["val_roc"], row["threshold"],
                     {"acc": row["test_acc"], "prec": row["test_prec"],
                      "rec": row["test_rec"], "f1": row["test_f1"],
                      "fpr": row["test_fpr"]},
-                    row["test_roc"],
-                    {"acc": row["test_acc_thr"], "prec": row["test_prec_thr"],
-                     "rec": row["test_rec_thr"], "f1": row["test_f1_thr"],
-                     "fpr": row["test_fpr_thr"]}))
+                    row["test_roc"]))
 
-            canon = canonical_ablation(ablation)
-            ckpt_src = (ablation_checkpoint_path(lang, canon)
-                        if canon != "full" else CLEAN_CHECKPOINT[lang])
+            ckpt_src = checkpoint_path_for_config(lang, ablation=ablation, num_layers=layers)
             ckpt_copy = "probe_%s_%s_s%d_bestvalf1.pth" % (lang, name, seed)
             try:
-                shutil.copyfile(ckpt_src, ckpt_copy)
+                if os.path.exists(ckpt_src):
+                    shutil.copyfile(ckpt_src, ckpt_copy)
             except OSError as exc:
                 print("[!] Could not copy the standard checkpoint: %s" % exc, flush=True)
             if state["best_roc_state"] is not None:
@@ -417,19 +432,19 @@ def main():
                         lambda r: (_rung_index(r["rung"]), int(r["seed"]),
                                    CANDIDATES.index(r["candidate"])))
 
-            def _cand(row):
-                return next(r for r in summary_rows if r["candidate"] == row)
+            def _cand(cand_name):
+                return next(r for r in summary_rows if r["candidate"] == cand_name)
             bf1, broc, fin = _cand("best_val_f1"), _cand("best_val_roc"), _cand("final_epoch")
             orc = _cand("oracle_test_f1")
             print("\n[i] %s seed %d | params=%s | train %.1f min"
                   % (name, seed, "{:,}".format(params), train_min), flush=True)
-            print("[i]   best val F1  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f  (strict @0.50)"
-                  % (bf1["epoch"], bf1["test_acc"], bf1["test_f1"], bf1["test_roc"]), flush=True)
-            print("[i]   best val ROC ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
-                  % (broc["epoch"], broc["test_acc"], broc["test_f1"], broc["test_roc"]), flush=True)
-            print("[i]   final epoch  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
-                  % (fin["epoch"], fin["test_acc"], fin["test_f1"], fin["test_roc"]), flush=True)
-            print("[i]   oracle (diagnostic) ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
+            print("[i]   best val F1  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f  thr %.4f"
+                  % (bf1["epoch"], bf1["test_acc"], bf1["test_f1"], bf1["test_roc"], bf1["threshold"]), flush=True)
+            print("[i]   best val ROC ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f  thr %.4f"
+                  % (broc["epoch"], broc["test_acc"], broc["test_f1"], broc["test_roc"], broc["threshold"]), flush=True)
+            print("[i]   final epoch  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f  thr %.4f"
+                  % (fin["epoch"], fin["test_acc"], fin["test_f1"], fin["test_roc"], fin["threshold"]), flush=True)
+            print("[i]   oracle test  ep %-3s  test acc %.4f  F1 %.4f  ROC %.4f"
                   % (orc["epoch"], orc["test_acc"], orc["test_f1"], orc["test_roc"]), flush=True)
             print("[i] %s updated (%d epoch rows); live: %s; summary: %s"
                   % (out_path, len(rows), live_path, summary_path), flush=True)
@@ -438,6 +453,9 @@ def main():
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+    if len(seeds) > 1:
+        _save_multiseed_summary(summary_path, multiseed_path)
 
     print("\n[i] DONE. Per-epoch rows: %s | live: %s | candidate summary: %s"
           % (out_path, live_path, summary_path), flush=True)
