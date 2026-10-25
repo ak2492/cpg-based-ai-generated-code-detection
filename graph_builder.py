@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch_geometric.data import Data
 
+from token_metrics import count_tree_tokens
 from language_configs import (
     MAX_VOCAB_SIZE, BPE_VOCAB_SIZE, MAX_SUBWORDS,
     MAX_AST_DEPTH, MAX_AST_NODES, CONTINUOUS_IDX,
@@ -500,6 +501,11 @@ def build_optimized_ast_graph(source_code, label, ctx):
     except Exception:
         return None
 
+    # Canonical source-token count: every leaf in the parse, independent of
+    # graph truncation. Carried on the Data object so clean/attack/external
+    # rows can all convert inference time to tokens/sec.
+    n_tokens = count_tree_tokens(tree.root_node)
+
     source_lines, nodes, edges, edge_types, subwords_list, leaf_order = source_code.splitlines(), [], [], [], [], []
     ast_id_to_node_id, scope_stack, cfg_seqs, func_registry, calls = {}, [{}], [], {}, []
     source_bytes = bytes(source_code, "utf8")
@@ -765,7 +771,8 @@ def build_optimized_ast_graph(source_code, label, ctx):
         y=torch.tensor([label], dtype=torch.float),
         num_nodes=len(nodes),
         virtual_idx=virtual_node_id,
-        global_stats=global_stats
+        global_stats=global_stats,
+        n_tokens=torch.tensor([n_tokens], dtype=torch.long),
     )
 
 

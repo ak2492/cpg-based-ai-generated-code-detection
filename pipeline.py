@@ -280,6 +280,7 @@ def _filter_graph_edges(graphs, keep_types):
             edge_index=g.edge_index[:, mask].clone(), edge_attr=g.edge_attr[mask].clone(),
             y=g.y.clone(), num_nodes=int(g.num_nodes),
             virtual_idx=int(g.virtual_idx), global_stats=g.global_stats.clone(),
+            n_tokens=getattr(g, "n_tokens", torch.tensor([0], dtype=torch.long)).clone(),
         ))
     return out
 
@@ -300,6 +301,7 @@ def _strip_virtual_node(graphs):
             edge_index=g.edge_index[:, keep_edge].clone(), edge_attr=g.edge_attr[keep_edge].clone(),
             y=g.y.clone(), num_nodes=n - 1,
             virtual_idx=-1, global_stats=g.global_stats.clone(),
+            n_tokens=getattr(g, "n_tokens", torch.tensor([0], dtype=torch.long)).clone(),
         ))
     return out
 

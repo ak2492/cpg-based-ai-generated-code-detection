@@ -121,10 +121,14 @@ def run_attack_benchmark(language="python", batch_size=None, threshold=None,
             'Scenario': suite_name,
             'Acc': res['Acc'], 'Prec': res['Prec'], 'Rec': res['Rec'],
             'F1': res['F1'], 'ROC': res['ROC'], 'FPR': res['FPR'],
-            'Lat': res['Latency_ms'], 'RAM': res['PeakRAM_MB'],
-            # I record throughput here because the 5-seed runner needs the
-            # same cost columns for every row.
-            'Thr': res['Throughput'], 'N': res['N'],
+            # Canonical keys: run_five_seeds.py reads these directly. The old
+            # Lat/Thr/RAM aliases silently produced zero cost columns there.
+            'Tokens': res.get('Tokens', 0),
+            'Latency_ms': res['Latency_ms'],
+            'Throughput': res['Throughput'],
+            'FilesPerSec': res.get('FilesPerSec', 0.0),
+            'MsPerToken': res.get('MsPerToken', 0.0),
+            'PeakRAM_MB': res['PeakRAM_MB'], 'N': res['N'],
         })
 
         print("\n" + "=" * 85)
