@@ -29,7 +29,7 @@ from model import (AdvancedASTGraphEncoder, ablation_checkpoint_path, canonical_
                    save_checkpoint_for_language, DEFAULT_ABLATION, DEFAULT_NUM_LAYERS,
                    checkpoint_path_for_config, is_default_architecture)
 from attack_utils import current_rss_mb, execute_model_eval_with_cost, print_detailed_metrics_with_cost
-from pipeline import load_bundle_for_ablation, require_adv_graphs, seed_everything
+from pipeline import ensure_data, load_bundle_for_ablation, require_adv_graphs, seed_everything
 
 
 TRAIN_TITLE = {
@@ -143,7 +143,7 @@ def _val_optimal_threshold(model, val_loader, device, fallback=0.50, prior=None)
     return _select_threshold(probs, labels, fallback=fallback, prior=prior)
 
 
-def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=30, patience=30,
+def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs=30, patience=50,
                        adversarial=False, language="python",
                        lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                        accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
@@ -334,7 +334,7 @@ def train_single_model(train_graphs, val_graphs, ctx, device, batch_size, epochs
     return model, best_f1, best_roc
 
 
-def train_model(language="python", epochs=30, batch_size=None, adversarial=False, patience=30,
+def train_model(language="python", epochs=30, batch_size=None, adversarial=False, patience=50,
                 lr=5e-5, weight_decay=1e-3, tmax=45, eta_min=1e-6,
                 accum_steps=2, smooth_pos=0.975, smooth_neg=0.025,
                 grad_clip=1.0, threshold=0.50,
@@ -362,6 +362,12 @@ def train_model(language="python", epochs=30, batch_size=None, adversarial=False
     if batch_size is None:
         batch_size = DEFAULT_BATCH_SIZE[language]
     bundle = load_bundle_for_ablation(language, ablation)
+    if adversarial and bundle["train_adv_graphs"] is None:
+        # load_bundle() only auto-extracts the clean pool when the bundle is
+        # missing, so build the adv pool now and reload. Doing this after the
+        # first load avoids a second full bundle load on every normal seed.
+        ensure_data(language, adversarial=True)
+        bundle = load_bundle_for_ablation(language, ablation)
     ctx = bundle["ctx"]
     if adversarial:
         train_graphs = require_adv_graphs(bundle, language)
@@ -427,7 +433,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--adversarial", action="store_true",
                         help="Train the adversarially augmented variant (token masking on)")
-    parser.add_argument("--patience", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42,
                         help="Global RNG seed for init/shuffle/dropout/masking (vary 42-46 for 5-seed average)")
     parser.add_argument("--ablation", type=str, default=DEFAULT_ABLATION,

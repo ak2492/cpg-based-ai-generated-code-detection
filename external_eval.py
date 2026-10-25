@@ -180,6 +180,11 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
 
     n_h = min(len(human_samples), MAX_SEMEVAL_SAMPLES_PER_CLASS)
     n_a = min(len(ai_samples), MAX_SEMEVAL_SAMPLES_PER_CLASS)
+
+    if n_h == 0 or n_a == 0:
+        print(f"[!] Insufficient Java samples extracted: {n_h} Human, {n_a} AI. Skipping.")
+        return {"clean": None, "adv": None}
+
     balanced = human_samples[:n_h] + ai_samples[:n_a]
     random.Random(SEED).shuffle(balanced)
 
@@ -192,6 +197,10 @@ def run_external_semeval_java(bundle, subtask_name, is_multiclass=False, batch_s
         rebuild_cache)
     # Normalization already applied inside build_or_load_graphs; a second
     # pass would corrupt scores because (x-mean)/std is not idempotent.
+
+    if len(semeval_graphs) == 0:
+        print("[!] No Java graphs parsed successfully.")
+        return {"clean": None, "adv": None}
 
     loader = DataLoader(semeval_graphs, batch_size=batch_size, shuffle=False)
 

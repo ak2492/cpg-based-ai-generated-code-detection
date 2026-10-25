@@ -13,10 +13,12 @@ Sequential usage:
 """
 import argparse
 import gc
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 
 import pandas as pd
 import torch
@@ -29,9 +31,11 @@ from attack_evaluation import run_attack_benchmark
 from pipeline import load_bundle, ensure_data
 import external_eval as ext
 
+MODEL_NAME = "cpg"
 LANGUAGES = ["python", "java", "cpp"]
 METRIC_COLS = ["Acc", "Prec", "Rec", "F1", "ROC", "FPR",
-               "Latency_ms", "Throughput", "PeakRAM_MB", "N"]
+               "Tokens", "Latency_ms", "Throughput", "FilesPerSec",
+               "MsPerToken", "PeakRAM_MB", "N"]
 COLUMNS = (["Language", "Variant", "Seed", "Scenario", "Threshold", "TrainValF1", "TrainValROC"]
            + METRIC_COLS)
 
@@ -74,13 +78,94 @@ def _scenario_name(suite):
             "hmcorp": "Ext HMCorp", "gptsniffer": "Ext GPTSniffer"}.get(suite, suite)
 
 
+def _write_timing(out_csv, language, variant, seeds, df, total_wall_s,
+                  training_s, eval_s, data_s, clean_eval_s,
+                  attack_eval_s, external_eval_s):
+    """Persist run-level deployment accounting next to the metrics CSV.
+
+    `non_train_s` follows the requested all-tests formula: total wall time
+    (preprocessing + every clean/attack/external evaluation + model loading)
+    minus training time, divided by every file/token that was scored.
+    """
+    if not out_csv:
+        return None
+    n = pd.to_numeric(df.get("N", pd.Series(dtype=float)), errors="coerce").fillna(0)
+    tokens = pd.to_numeric(df.get("Tokens", pd.Series(dtype=float)),
+                           errors="coerce").fillna(0)
+    total_file_evals = int(n.sum())
+    total_tokens = int(tokens.sum())
+    non_train_s = max(0.0, float(total_wall_s) - float(training_s))
+
+    clean = df[df["Scenario"] == "Clean Test"] if "Scenario" in df else df.iloc[0:0]
+    clean_n = int(pd.to_numeric(clean.get("N", pd.Series(dtype=float)),
+                                errors="coerce").fillna(0).sum())
+    clean_tokens = int(pd.to_numeric(clean.get("Tokens", pd.Series(dtype=float)),
+                                     errors="coerce").fillna(0).sum())
+    unique_test_files = int(pd.to_numeric(clean.get("N", pd.Series(dtype=float)),
+                                          errors="coerce").dropna().iloc[-1]) \
+        if len(clean) and clean["N"].notna().any() else 0
+
+    payload = {
+        "model": MODEL_NAME,
+        "language": language,
+        "variant": variant,
+        "seeds": list(seeds),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "total_wall_s": round(float(total_wall_s), 6),
+        "preprocessing_s": round(float(data_s), 6),
+        "training_s": round(float(training_s), 6),
+        "eval_s": round(float(eval_s), 6),
+        "clean_eval_s": round(float(clean_eval_s), 6),
+        "attack_eval_s": round(float(attack_eval_s), 6),
+        "external_eval_s": round(float(external_eval_s), 6),
+        "non_train_s": round(non_train_s, 6),
+        "unique_test_files": unique_test_files,
+        "total_file_evaluations": total_file_evals,
+        "total_tokens": total_tokens,
+        "amortized_ms_per_file": round(1000.0 * non_train_s / total_file_evals, 6)
+        if total_file_evals else None,
+        "amortized_ms_per_token": round(1000.0 * non_train_s / total_tokens, 6)
+        if total_tokens else None,
+        "clean_test": {
+            "file_evaluations": clean_n,
+            "tokens": clean_tokens,
+            "eval_s": round(float(clean_eval_s), 6),
+            "ms_per_file": round(1000.0 * float(clean_eval_s) / clean_n, 6)
+            if clean_n else None,
+            "ms_per_token": round(1000.0 * float(clean_eval_s) / clean_tokens, 6)
+            if clean_tokens else None,
+            "files_per_sec": round(clean_n / float(clean_eval_s), 6)
+            if clean_eval_s > 0 else None,
+            "tokens_per_sec": round(clean_tokens / float(clean_eval_s), 6)
+            if clean_eval_s > 0 else None,
+        },
+        "note": ("Clean Test rows score precomputed graphs; raw-code end-to-end "
+                 "deployment numbers come from deployment_benchmark.py."),
+    }
+    path = os.path.splitext(out_csv)[0] + "_timing.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"[i] Wrote run-level deployment timing -> {path}")
+    return path
+
+
 def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                  threshold=None, base_seed=42, skip_external=False,
                  out_csv=None, resume=False, graphs_cache_dir=".",
                  rebuild_cache=False, rebuild_bundle=False,
                  ablation=DEFAULT_ABLATION):
+    t_run_start = time.perf_counter()
+    data_s = training_s = eval_s = 0.0
+    clean_eval_s = attack_eval_s = external_eval_s = 0.0
+
     # Ensure CPG bundle exists; auto-extract via main.py if missing
+    t_phase = time.perf_counter()
     ensure_data(language, adversarial=adversarial, rebuild=rebuild_bundle)
+    data_s += time.perf_counter() - t_phase
+    if rebuild_bundle:
+        # A rebuilt bundle invalidates every derived graph cache. Do this
+        # explicitly instead of keying cache names on the bundle mtime.
+        rebuild_cache = True
     variant = "adv" if adversarial else "clean"
     tag = "ADV" if adversarial else "CLEAN"
     ckpt_canon, ckpt_tpl = _ckpt_files(language, adversarial)
@@ -116,9 +201,11 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                     best_f1 = float(hit["TrainValF1"].iloc[0])
                     best_roc = float(hit["TrainValROC"].iloc[0])
         else:
+            t_phase = time.perf_counter()
             trained, best_f1, best_roc = train_model(
                 language=language, epochs=epochs, batch_size=batch_size,
                 adversarial=adversarial, seed=seed, ablation=ablation)
+            training_s += time.perf_counter() - t_phase
             shutil.copyfile(ckpt_canon, seed_ckpt)
             print(f"Checkpoint archived -> {seed_ckpt}")
             # I delete the trained model here because the next seed allocates
@@ -137,7 +224,10 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                 "TrainValF1": best_f1, "TrainValROC": best_roc,
                 "Acc": res["Acc"], "Prec": res["Prec"], "Rec": res["Rec"],
                 "F1": res["F1"], "ROC": res["ROC"], "FPR": res["FPR"],
+                "Tokens": res.get("Tokens", 0),
                 "Latency_ms": res["Latency_ms"], "Throughput": res["Throughput"],
+                "FilesPerSec": res.get("FilesPerSec", 0.0),
+                "MsPerToken": res.get("MsPerToken", 0.0),
                 "PeakRAM_MB": res.get("PeakRAM_MB", 0.0), "N": res["N"],
             })
 
@@ -150,13 +240,18 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
         seed_threshold = threshold if threshold is not None else checkpoint_threshold(ckpt_canon)
         print(f"[i] Seed {seed} decision threshold: {seed_threshold:.4f}"
               + (" (checkpoint-calibrated)" if threshold is None else " (forced via --threshold)"))
+        t_phase = time.perf_counter()
         res = evaluate_model(language=language, batch_size=batch_size,
                              adversarial=adversarial, threshold=seed_threshold,
                              seed=seed, ablation=ablation)
+        dt = time.perf_counter() - t_phase
+        clean_eval_s += dt
+        eval_s += dt
         _row("Clean Test", res)
         del res
 
         shutil.copyfile(seed_ckpt, ckpt_canon)
+        t_phase = time.perf_counter()
         df = run_attack_benchmark(language=language, batch_size=batch_size,
                                   threshold=seed_threshold, base_seed=base_seed,
                                   adversarial=adversarial,
@@ -167,13 +262,20 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
                 continue  # already covered by evaluate_model above
             _row(r["Scenario"], {"Acc": r["Acc"], "Prec": r["Prec"], "Rec": r["Rec"],
                                  "F1": r["F1"], "ROC": r["ROC"], "FPR": r["FPR"],
+                                 "Tokens": r.get("Tokens", 0),
                                  "Latency_ms": r.get("Latency_ms", 0.0),
                                  "Throughput": r.get("Throughput", 0.0),
+                                 "FilesPerSec": r.get("FilesPerSec", 0.0),
+                                 "MsPerToken": r.get("MsPerToken", 0.0),
                                  "PeakRAM_MB": r.get("PeakRAM_MB", 0.0),
                                  "N": r.get("N", 0)})
+        dt = time.perf_counter() - t_phase
+        attack_eval_s += dt
+        eval_s += dt
 
         if not skip_external:
             shutil.copyfile(seed_ckpt, ckpt_canon)
+            t_phase = time.perf_counter()
             bundle = load_bundle(language)
             for suite in _external_suites(language):
                 if suite.startswith("semeval_"):
@@ -198,6 +300,9 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            dt = time.perf_counter() - t_phase
+            external_eval_s += dt
+            eval_s += dt
 
         # Incremental save after each seed finishes so a killed session leaves
         # a complete CSV of every seed run up to that point.
@@ -207,7 +312,11 @@ def run_language(language, seeds, adversarial=False, epochs=30, batch_size=None,
             print(f"[{language.upper()}] incremental rows saved to {out_csv} "
                   f"({len(df_seed)} rows through seed {seed})")
 
-    return pd.DataFrame(rows, columns=COLUMNS)
+    df_all = pd.DataFrame(rows, columns=COLUMNS)
+    _write_timing(out_csv, language, variant, seeds, df_all,
+                  time.perf_counter() - t_run_start, training_s, eval_s,
+                  data_s, clean_eval_s, attack_eval_s, external_eval_s)
+    return df_all
 
 
 def summarize(df):
@@ -266,7 +375,8 @@ if __name__ == "__main__":
     parser.add_argument("--rebuild-cache", action="store_true",
                         help="Force re-parsing even when cache files exist")
     parser.add_argument("--rebuild-bundle", action="store_true",
-                        help="Force re-extracting the CPG bundle via main.py")
+                        help="Force re-extracting the CPG bundle via main.py "
+                             "(also rebuilds the derived graph caches)")
     parser.add_argument("--cache-dir", type=str, default=".",
                         help="Directory for extract-once cache files")
     parser.add_argument("--resume", action="store_true",

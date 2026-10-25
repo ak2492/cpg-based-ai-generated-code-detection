@@ -916,31 +916,24 @@ ATTACK_SUITES = [
 # first seed; later seeds load them and only redo model inference.
 
 
-def _bundle_mtime(language):
-    # I fingerprint the bundle file because a rebuild (new main.py run) is
-    # the only local event that can change parsed graphs.
-    try:
-        return int(os.path.getmtime(f"{language}_cpg_bundle.pt"))
-    except OSError:
-        return 0
-
-
 def attack_graph_cache_path(language, attack_key, mode, target, base_seed,
                             limit, cache_dir="."):
+    # Stable descriptive name: no bundle mtime or code fingerprint. A rerun
+    # must reuse the existing cache; pass --rebuild-cache when the bundle was
+    # deliberately rebuilt.
     lim = "full" if limit is None else f"lim{limit}"
     return os.path.join(
         cache_dir,
         f"{language}_graphs_{attack_key}_{mode}_{target}"
-        f"_b{base_seed}_{lim}_m{_bundle_mtime(language)}.pt")
+        f"_b{base_seed}_{lim}.pt")
 
 
 def external_graph_cache_path(language, suite, base_seed, cache_dir="."):
     # External rows are sampled with fixed seeds, so one cache entry per
-    # (language, suite) covers every training seed; base_seed and the bundle
-    # fingerprint stay in the key as insurance.
+    # (language, suite) covers every training seed.
     return os.path.join(
         cache_dir,
-        f"{language}_extgraphs_{suite}_b{base_seed}_m{_bundle_mtime(language)}.pt")
+        f"{language}_extgraphs_{suite}_b{base_seed}.pt")
 
 
 def build_or_load_graphs(cache_path, ctx, build_fn, rebuild=False):
@@ -962,8 +955,11 @@ def build_or_load_graphs(cache_path, ctx, build_fn, rebuild=False):
         # I validate the payload here because a half-written or foreign .pt
         # must never silently poison a seed run; anything off forces a rebuild.
         if graphs is not None and isinstance(graphs, list) and len(graphs) > 0:
-            print(f"  Loaded cached graphs from {cache_path} (no re-parsing)")
-            return graphs
+            if all(getattr(g, "n_tokens", None) is not None for g in graphs):
+                print(f"  Loaded cached graphs from {cache_path} (no re-parsing)")
+                return graphs
+            print(f"  [!] cache at {cache_path} predates token accounting; rebuilding.")
+            graphs = None
         if graphs is not None:
             print(f"  [!] cache at {cache_path} invalid/empty; rebuilding.")
     graphs = build_fn()
@@ -1008,13 +1004,20 @@ def execute_model_eval(eval_model, loader, device, threshold=0.50):
 def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
     eval_model.eval()
     probs, labels = [], []
+    n_tokens = 0
     rss_before = current_rss_mb()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
+            if getattr(batch, "n_tokens", None) is not None:
+                n_tokens += int(batch.n_tokens.sum().item())
             probs.extend(torch.sigmoid(eval_model(batch)).cpu().numpy().flatten())
             labels.extend(batch.y.cpu().numpy().flatten())
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     inf_duration = time.perf_counter() - t_start
     peak_ram_mb = max(rss_before, current_rss_mb())
@@ -1026,7 +1029,9 @@ def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
     tn, fp, fn, tp = cm.ravel()
 
     latency_ms = (inf_duration / len(labels)) * 1000.0
-    throughput = len(labels) / max(1e-6, inf_duration)
+    files_per_sec = len(labels) / max(1e-6, inf_duration)
+    tokens_per_sec = n_tokens / max(1e-6, inf_duration)
+    ms_per_token = (inf_duration / n_tokens) * 1000.0 if n_tokens else 0.0
 
     return {
         'Acc': accuracy_score(labels, preds),
@@ -1036,8 +1041,9 @@ def execute_model_eval_with_cost(eval_model, loader, device, threshold=0.50):
         'ROC': roc_auc_score(labels, probs) if len(np.unique(labels)) > 1 else 0.0,
         'FPR': fp / max(1, fp + tn),
         'TN': tn, 'FP': fp, 'FN': fn, 'TP': tp, 'N': len(labels),
-        'Latency_ms': latency_ms, 'Throughput': throughput,
-        'PeakRAM_MB': peak_ram_mb,
+        'Tokens': n_tokens, 'Latency_ms': latency_ms,
+        'Throughput': tokens_per_sec, 'FilesPerSec': files_per_sec,
+        'MsPerToken': ms_per_token, 'PeakRAM_MB': peak_ram_mb,
     }
 
 
@@ -1051,7 +1057,7 @@ def print_detailed_metrics_with_cost(model_name, res):
     print(f"{model_name}:")
     print(f"  Metrics -> Acc: {res['Acc']:.4f} | Prec: {res['Prec']:.4f} | Rec: {res['Rec']:.4f} | F1: {res['F1']:.4f} | ROC: {res['ROC']:.4f} | FPR: {res['FPR']:.4f}")
     print(f"  ConfMat -> TN: {res['TN']:<5} FP: {res['FP']:<5} FN: {res['FN']:<5} TP: {res['TP']:<5}")
-    print(f"  Cost    -> Latency: {res['Latency_ms']:.2f} ms/graph | Throughput: {res['Throughput']:.2f} graphs/sec | PeakRAM: {res.get('PeakRAM_MB', 0.0):.2f} MB")
+    print(f"  Cost    -> Latency: {res['Latency_ms']:.2f} ms/file | Throughput: {res['Throughput']:.2f} tokens/sec | Files: {res.get('FilesPerSec', 0.0):.2f}/sec | Tokens: {res.get('Tokens', 0)} | PeakRAM: {res.get('PeakRAM_MB', 0.0):.2f} MB")
 
 
 def evaluate_distribution_shift(train_graphs, ood_graphs, feature_names=None):
